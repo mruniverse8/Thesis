@@ -1,0 +1,39 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.config_utils import resolve_runtime_config_paths
+from src.io_utils import load_yaml, resolve_path, set_seed
+from src.training import train_model
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train BioT5+ on description-to-SELFIES SFT.")
+    parser.add_argument(
+        "--config",
+        default="configs/sft_chebi20.yaml",
+        help="Path to the YAML training config relative to the project root.",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+    config_path = resolve_path(args.config, PROJECT_ROOT)
+    config = resolve_runtime_config_paths(load_yaml(config_path), project_root=PROJECT_ROOT)
+    set_seed(int(config.get("seed", 42)))
+
+    summary = train_model(config)
+    print(json.dumps(summary, indent=2))
+
+
+if __name__ == "__main__":
+    main()

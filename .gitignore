@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.mypy_cache/
+
+outputs/
+data/chebi20/raw/
+data/chebi20/processed/*.jsonl
+data/chebi20/processed/*.json

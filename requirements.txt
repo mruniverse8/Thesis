@@ -1,0 +1,12 @@
+datasets>=2.18.0
+PyYAML>=6.0
+pytest>=8.0
+selfies>=2.1.1
+# Install RDKit in the conda env for reward_utils:
+# conda install -n thesis_biot5_sft -c conda-forge rdkit
+sentencepiece>=0.1.99
+torch>=2.1.0
+transformers>=4.39.0
+tqdm>=4.66.0
+# Optional but required for LoRA-based PPO training in post_training/:
+peft>=0.12.0
