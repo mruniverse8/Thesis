@@ -1,0 +1,30 @@
+seed: 42
+
+model:
+  model_name_or_path: QizhiPei/biot5-plus-base
+  tokenizer_name: QizhiPei/biot5-plus-base
+  base_tokenizer_name: google/t5-v1_1-base
+  selfies_vocab_path: ../Other-projects/BioT5/dict/selfies_dict.txt
+  device: auto
+
+data:
+  train_file: data/chebi20/processed/train.jsonl
+  staging_dir: data_collection/outputs/chebi20_biot5_train
+  derived_train_file: data/post_training/processed/train_multimol.jsonl
+
+generation:
+  target_molecules_per_description: 100
+  max_source_length: 512
+  max_new_tokens: 384
+  penalty_alpha: 0.5
+  top_k: 4
+
+filtering:
+  acceptance_dice_threshold: 0.7
+  fingerprint_radius: 2
+  fingerprint_num_bits: 2048
+  max_molecules_per_example: 8
+
+runtime:
+  description_offset: 0
+  max_descriptions:

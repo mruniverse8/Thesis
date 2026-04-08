@@ -8,3 +8,9 @@ outputs/
 data/chebi20/raw/
 data/chebi20/processed/*.jsonl
 data/chebi20/processed/*.json
+data/lpm24/raw/
+data/lpm24/processed/*.jsonl
+data/lpm24/processed/*.json
+data/post_training/processed/*.jsonl
+data/post_training/processed/*.json
+data_collection/outputs/
