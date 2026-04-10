@@ -13,6 +13,7 @@ Each notebook:
 - installs the Python dependencies needed by the repo
 - checks for `torch`, `rdkit`, `transformers`, `datasets`, and `peft`
 - uses the committed BioT5 SELFIES vocabulary file from `molecules/dict/selfies_dict.txt`
+- imports shared notebook helpers from the repo-root module `thesis_kaggle_support.py`
 - writes a Kaggle-local temporary YAML config under `kaggle/generated_configs/`
 - runs the existing repo CLI entrypoint instead of duplicating training logic
 - exports a stage artifact bundle under `/kaggle/working/thesis_artifacts/<stage_name>/`
