@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import Counter
+import inspect
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, Sequence
 
@@ -95,6 +96,29 @@ class BioT5ContrastiveGenerator:
             self.model.resize_token_embeddings(len(self.training_tokenizer))
         self.model.to(self.device)
         self.model.eval()
+        self.use_remote_contrastive_search = self._supports_remote_contrastive_search()
+
+    @staticmethod
+    def _needs_remote_contrastive_search(exc: Exception) -> bool:
+        message = str(exc)
+        return (
+            "Contrastive Search requires `trust_remote_code=True`" in message
+            or "transformers-community/contrastive-search" in message
+        )
+
+    @staticmethod
+    def _remote_contrastive_generation_kwargs(generation_kwargs: dict[str, Any]) -> dict[str, Any]:
+        remote_kwargs = dict(generation_kwargs)
+        remote_kwargs["custom_generate"] = "transformers-community/contrastive-search"
+        remote_kwargs["trust_remote_code"] = True
+        return remote_kwargs
+
+    def _supports_remote_contrastive_search(self) -> bool:
+        try:
+            parameters = inspect.signature(self.model.generate).parameters
+        except (TypeError, ValueError):
+            return False
+        return "custom_generate" in parameters and "trust_remote_code" in parameters
 
     def _blocked_sequence_ids(self, generated_ids: Sequence[int]) -> list[int]:
         decoder_start_token_id = getattr(self.model.config, "decoder_start_token_id", None)
@@ -133,8 +157,18 @@ class BioT5ContrastiveGenerator:
                 self.generation_config,
                 bad_words_ids=blocked_sequences,
             )
+            if self.use_remote_contrastive_search:
+                generation_kwargs = self._remote_contrastive_generation_kwargs(generation_kwargs)
             with self.torch.no_grad():
-                generated_ids = self.model.generate(**encoded, **generation_kwargs)
+                try:
+                    generated_ids = self.model.generate(**encoded, **generation_kwargs)
+                except ValueError as exc:
+                    if self.use_remote_contrastive_search or not self._needs_remote_contrastive_search(exc):
+                        raise
+                    generated_ids = self.model.generate(
+                        **encoded,
+                        **self._remote_contrastive_generation_kwargs(generation_kwargs),
+                    )
 
             raw_text = self.decoder_tokenizer.batch_decode(
                 generated_ids,

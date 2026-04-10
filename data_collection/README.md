@@ -54,6 +54,11 @@ Current defaults in `configs/collect_biot5_chebi20.yaml`:
 - acceptance threshold: Dice similarity `0.7`
 - retained grouped molecules per description: `8`
 
+With newer `transformers` releases, contrastive search is loaded through the
+`transformers-community/contrastive-search` custom generator. The active
+collection code retries generation with `trust_remote_code=True` automatically,
+so the Kaggle notebooks do not need a separate workaround.
+
 Useful debug knobs in the same config:
 
 - `runtime.max_descriptions`: limit collection to the first `N` unique descriptions
