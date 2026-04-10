@@ -49,11 +49,7 @@ Train:
 python scripts/train_sft.py --config configs/sft_chebi20.yaml
 ```
 
-Evaluate the best checkpoint on the validation split:
-
-```bash
-python scripts/eval_sft.py --config configs/sft_chebi20.yaml --checkpoint outputs/chebi20_sft/checkpoints/best --split validation
-```
+The previous evaluation commands have been archived under `legacy/legacy_eval/scripts/` while evaluation is being redesigned.
 
 ## Recommended Order
 
@@ -64,5 +60,4 @@ python scripts/smoke_test_pipeline.py
 python -m pytest tests -q
 python scripts/download_chebi20.py --output-dir data/chebi20
 python scripts/train_sft.py --config configs/sft_chebi20.yaml
-python scripts/eval_sft.py --config configs/sft_chebi20.yaml --checkpoint outputs/chebi20_sft/checkpoints/best --split validation
 ```

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
-from .defaults import (
+from molecules.defaults import (
     CHEBI20_REWARD_CONFIG,
     DEFAULT_REWARD_CONFIG,
     PPO_DEFAULTS,
     RewardConfig,
 )
-from .rewards import (
+from molecules.parsing import MoleculeRecord, is_duplicate_candidate, parse_molecule_text
+from molecules.rewards import (
     RewardBreakdown,
     RewardComponent,
     compute_rdiv,
@@ -14,8 +15,7 @@ from .rewards import (
     compute_total_reward,
     score_candidate_sequence,
 )
-from .similarity import compute_dice_similarity, compute_tanimoto_similarity
-from .validation import MoleculeRecord, is_duplicate_candidate, parse_molecule_text
+from molecules.similarity import compute_dice_similarity, compute_tanimoto_similarity
 
 __all__ = [
     "CHEBI20_REWARD_CONFIG",

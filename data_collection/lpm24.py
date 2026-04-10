@@ -5,7 +5,7 @@ from typing import Any, Iterable
 
 from datasets import Dataset, DatasetDict, load_dataset
 
-from post_training.sft_dataset import build_multi_molecule_processed_record
+from molecules.datasets.multi import build_multi_molecule_processed_record
 from src.io_utils import ensure_dir, write_json, write_jsonl
 from src.prompting import normalize_free_text
 

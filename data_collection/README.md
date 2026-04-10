@@ -22,13 +22,13 @@ pip install -r requirements.txt
 conda install -n thesis_biot5_sft -c conda-forge rdkit
 ```
 
-The collection script uses the base BioT5+ checkpoint from Hugging Face and the BioT5 SELFIES vocabulary file. The default config expects the vocab here:
+The collection script uses the base BioT5+ checkpoint from Hugging Face and the BioT5 SELFIES vocabulary file. The repo now vendors that vocab here:
 
 ```bash
-../Other-projects/BioT5/dict/selfies_dict.txt
+molecules/dict/selfies_dict.txt
 ```
 
-If your local path is different, change `model.selfies_vocab_path` in `configs/collect_biot5_chebi20.yaml`.
+The default configs already point at that in-repo path, so no extra local dependency is required.
 
 ## Run ChEBI-20 Collection
 
@@ -114,9 +114,9 @@ Read the code in this order if you want to understand the pipeline quickly.
   Loads the base BioT5+ model and tokenizers, then generates one candidate at a time while blocking exact repeats.
 - `data_collection/biot5_collection.py::_select_collection_records`
   Selects unique descriptions in dataset order before applying offset and limit.
-- `data_collection/biot5_collection.py::_prepare_reference_groups`
+- `data_collection/molecule_utils.py::prepare_reference_groups`
   Groups reference molecules by description and precomputes fingerprints used by acceptance filtering.
-- `data_collection/biot5_collection.py::_assess_candidate`
+- `data_collection/molecule_utils.py::assess_candidate`
   Core filtering step. Parses SELFIES, validates chemistry with RDKit, canonicalizes SMILES, computes best Dice similarity, and returns the rejection reason or acceptance result.
 - `data_collection/biot5_collection.py::collect_biot5_training_data`
   Main orchestration entrypoint. Builds prompts, calls the generator, deduplicates accepted molecules by canonical SMILES, writes staged artifacts, and produces `train_multimol.jsonl`.
@@ -133,12 +133,12 @@ Shared functions used by the pipeline:
   Light cleanup on raw model output before parsing.
 - `src/selfies_utils.py::parse_generated_selfies`
   Extracts and decodes the SELFIES span from generated text.
-- `evaluation/grouping.py::build_reference_index`
-  Groups the training references by description.
-- `evaluation/config.py::MoleculeMetricConfig`
+- `data_collection/molecule_utils.py::CollectionMetricConfig`
   Holds the similarity and fingerprint settings used by filtering.
-- `post_training/sft_dataset.py::build_multi_molecule_processed_record`
+- `molecules/datasets/multi.py::build_multi_molecule_processed_record`
   Converts grouped description targets into the post-training schema.
+
+The canonical molecule and chemistry code now lives under `../molecules/`. The `data_collection/` package consumes those helpers but is no longer the source of truth for chemistry primitives.
 
 ## Filtering Logic
 

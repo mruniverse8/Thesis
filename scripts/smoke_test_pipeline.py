@@ -9,10 +9,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from molecules.selfies import (
+    decode_selfies_to_smiles,
+    filter_selfies,
+    unwrap_selfies_target,
+    wrap_selfies_target,
+)
 from src.datasets import TextToSelfiesDataset, build_processed_record
-from src.evaluation import decode_selfies_to_smiles, filter_selfies
 from src.io_utils import write_jsonl
-from src.prompting import build_text2mol_prompt, unwrap_selfies_target, wrap_selfies_target
+from src.prompting import build_text2mol_prompt
 
 
 def run_check(name: str, fn) -> tuple[str, bool, str]:

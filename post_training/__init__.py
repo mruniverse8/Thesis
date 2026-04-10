@@ -1,1 +1,1 @@
-"""Post-training utilities for multi-molecule SFT and molecule-wise PPO."""
+"""Post-training utilities for staged multi-molecule SFT and molecule-stage PPO."""

@@ -1,5 +1,12 @@
 # `reward_utils`
 
+This package is now a compatibility layer for older imports.
+
+The canonical molecule and chemistry implementation lives under:
+
+- `../molecules/`
+- `../molecules/README.md`
+
 This workspace isolates the reward logic needed to reproduce the reinforcement-learning stage from:
 
 - arXiv `2410.03138v2`
@@ -29,6 +36,16 @@ The current project already depends on:
 - `pytest`
 
 ## File Layout
+
+Canonical runtime ownership:
+
+- `molecules/parsing.py`: SELFIES/SMILES parsing, canonicalization, duplicate checks
+- `molecules/selfies.py`: SELFIES normalization, wrapping, repair, and decode helpers
+- `molecules/fingerprints.py`: Morgan fingerprint generation
+- `molecules/similarity.py`: Dice and Tanimoto similarity helpers
+- `molecules/rewards/scoring.py`: `rmatch`, `rdiv`, total reward, and sequence scoring
+
+Compatibility wrappers retained here:
 
 - `defaults.py`: paper-grounded reward defaults and PPO hyperparameter references
 - `validation.py`: SELFIES/SMILES parsing, canonicalization, duplicate checks

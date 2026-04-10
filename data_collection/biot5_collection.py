@@ -1,38 +1,27 @@
 from __future__ import annotations
 
 from collections import Counter
-from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol, Sequence
 
 from tqdm import tqdm
 
-from evaluation.config import MoleculeMetricConfig
-from evaluation.grouping import build_reference_index
-from reward_utils.fingerprints import build_morgan_fingerprint
-from reward_utils.validation import parse_molecule_text
+from molecules.collection.filtering import (
+    CollectionMetricConfig,
+    assess_candidate,
+    prepare_reference_groups,
+)
+from molecules.selfies import normalize_generated_selfies
 from src.io_utils import dump_yaml, ensure_dir, read_jsonl, set_seed, write_json, write_jsonl
 from src.prompting import build_text2mol_prompt, normalize_free_text
-from src.selfies_utils import normalize_generated_selfies, parse_generated_selfies
 
 if TYPE_CHECKING:
     import torch
-
-try:
-    from rdkit import DataStructs
-except ImportError:  # pragma: no cover - guarded by dependency checks in tests/runtime
-    DataStructs = None
 
 
 class CandidateGenerator(Protocol):
     def generate_candidates(self, prompt_text: str, target_count: int) -> list[str]:
         ...
-
-
-@dataclass(frozen=True)
-class PreparedReference:
-    canonical_smiles: str
-    fingerprint: object
 
 
 def build_contrastive_generation_kwargs(
@@ -184,113 +173,6 @@ def _select_collection_records(
     return selected
 
 
-def _prepare_reference_groups(
-    records: list[dict[str, Any]],
-    metric_config: MoleculeMetricConfig,
-) -> dict[str, tuple[PreparedReference, ...]]:
-    if DataStructs is None:
-        raise ImportError("RDKit is required for BioT5 data collection.")
-
-    reference_index = build_reference_index(records)
-    prepared_by_description: dict[str, tuple[PreparedReference, ...]] = {}
-
-    for description, references in reference_index.references_by_description.items():
-        prepared: list[PreparedReference] = []
-        for reference in references:
-            record = parse_molecule_text(reference.molecule_text, representation=reference.representation)
-            fingerprint = build_morgan_fingerprint(
-                record,
-                radius=metric_config.fingerprint_radius,
-                n_bits=metric_config.fingerprint_num_bits,
-            )
-            if not record.is_valid or fingerprint is None or record.canonical_smiles is None:
-                continue
-            prepared.append(
-                PreparedReference(
-                    canonical_smiles=record.canonical_smiles,
-                    fingerprint=fingerprint,
-                )
-            )
-        if not prepared:
-            raise ValueError(f"No valid reference molecules available for description: {description!r}")
-        prepared_by_description[description] = tuple(prepared)
-
-    return prepared_by_description
-
-
-def _assess_candidate(
-    *,
-    candidate_id: str,
-    description_id: str,
-    description: str,
-    raw_prediction_text: str,
-    references: Sequence[PreparedReference],
-    metric_config: MoleculeMetricConfig,
-) -> dict[str, Any]:
-    normalized_prediction = normalize_generated_selfies(raw_prediction_text)
-    assessment = {
-        "id": candidate_id,
-        "description_id": description_id,
-        "description": description,
-        "raw_prediction_text": raw_prediction_text,
-        "normalized_prediction_selfies": normalized_prediction,
-        "parsed_selfies": None,
-        "decoded_smiles": None,
-        "canonical_smiles": None,
-        "used_repair": False,
-        "accepted": False,
-        "max_dice_similarity": 0.0,
-        "best_reference_smiles": None,
-        "rejection_reason": None,
-    }
-
-    if not normalized_prediction:
-        assessment["rejection_reason"] = "empty_output"
-        return assessment
-
-    selfies_text, decoded_smiles, used_repair = parse_generated_selfies(raw_prediction_text)
-    assessment["parsed_selfies"] = selfies_text
-    assessment["decoded_smiles"] = decoded_smiles
-    assessment["used_repair"] = used_repair
-
-    if not selfies_text or not decoded_smiles:
-        assessment["rejection_reason"] = "invalid_selfies"
-        return assessment
-
-    candidate_record = parse_molecule_text(selfies_text, representation="selfies")
-    if not candidate_record.is_valid or candidate_record.canonical_smiles is None:
-        assessment["rejection_reason"] = "invalid_molecule"
-        return assessment
-
-    fingerprint = build_morgan_fingerprint(
-        candidate_record,
-        radius=metric_config.fingerprint_radius,
-        n_bits=metric_config.fingerprint_num_bits,
-    )
-    if fingerprint is None:
-        assessment["rejection_reason"] = "invalid_molecule"
-        return assessment
-
-    best_similarity = 0.0
-    best_reference_smiles: str | None = None
-    for reference in references:
-        similarity = float(DataStructs.DiceSimilarity(fingerprint, reference.fingerprint))
-        if similarity > best_similarity:
-            best_similarity = similarity
-            best_reference_smiles = reference.canonical_smiles
-
-    assessment["canonical_smiles"] = candidate_record.canonical_smiles
-    assessment["max_dice_similarity"] = best_similarity
-    assessment["best_reference_smiles"] = best_reference_smiles
-
-    if best_similarity <= metric_config.acceptance_dice_threshold:
-        assessment["rejection_reason"] = "unaccepted_molecule"
-        return assessment
-
-    assessment["accepted"] = True
-    return assessment
-
-
 def collect_biot5_training_data(
     config: dict[str, Any],
     generator: CandidateGenerator | None = None,
@@ -306,7 +188,7 @@ def collect_biot5_training_data(
     if max_descriptions is not None:
         max_descriptions = int(max_descriptions)
 
-    metric_config = MoleculeMetricConfig(
+    metric_config = CollectionMetricConfig(
         fingerprint_radius=int(config["filtering"]["fingerprint_radius"]),
         fingerprint_num_bits=int(config["filtering"]["fingerprint_num_bits"]),
         acceptance_dice_threshold=float(config["filtering"]["acceptance_dice_threshold"]),
@@ -320,7 +202,7 @@ def collect_biot5_training_data(
         description_offset=description_offset,
         max_descriptions=max_descriptions,
     )
-    reference_groups = _prepare_reference_groups(all_train_records, metric_config)
+    reference_groups = prepare_reference_groups(all_train_records, metric_config)
 
     if generator is None:
         generator = BioT5ContrastiveGenerator(
@@ -378,7 +260,7 @@ def collect_biot5_training_data(
                 }
             )
 
-            assessment = _assess_candidate(
+            assessment = assess_candidate(
                 candidate_id=candidate_id,
                 description_id=description_id,
                 description=description,

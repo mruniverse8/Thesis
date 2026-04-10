@@ -10,8 +10,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from post_training.config_utils import resolve_multi_molecule_sft_config_paths
-from post_training.sft_training import train_multi_molecule_sft
+from post_training.shared.config import resolve_multi_molecule_sft_config_paths
+from post_training.sft_multi.trainer import run_multi_molecule_sft
 from src.io_utils import load_yaml, resolve_path, set_seed
 
 
@@ -33,7 +33,7 @@ def main() -> None:
     config = resolve_multi_molecule_sft_config_paths(load_yaml(config_path), project_root=PROJECT_ROOT)
     set_seed(int(config.get("seed", 42)))
 
-    summary = train_multi_molecule_sft(config)
+    summary = run_multi_molecule_sft(config)
     print(json.dumps(summary, indent=2))
 
 
