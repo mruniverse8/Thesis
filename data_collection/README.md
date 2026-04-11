@@ -17,7 +17,8 @@ python scripts/collect_biot5_chebi20.py --config configs/collect_biot5_chebi20.y
 
 Current defaults in `configs/collect_biot5_chebi20.yaml`:
 
-- base model: `QizhiPei/biot5-plus-base`
+- model checkpoint: `QizhiPei/biot5-plus-base-chebi20`
+- tokenizer source: checkpoint-native `T5Tokenizer.from_pretrained(model_name_or_path)`
 - dataset: `data/chebi20/processed/train.jsonl`
 - target generations per description: `30`
 - decoding: diverse beam search
@@ -63,7 +64,7 @@ Read the active code in this order:
 2. `data_collection/config_utils.py`
    Resolves repo-relative paths in the collection config.
 3. `data_collection/biot5_generation.py`
-   Builds diverse-beam `generate(...)` kwargs, loads the BioT5 model/tokenizer path, and handles remote `group-beam-search` fallback when required.
+   Builds diverse-beam `generate(...)` kwargs, loads the BioT5 ChEBI-20 checkpoint plus its native tokenizer, and handles remote `group-beam-search` fallback when required.
 4. `data_collection/biot5_collection.py`
    Orchestrates dataset selection, prompt construction, candidate generation, artifact writing, and final grouped dataset export.
 5. `molecules/selfies.py`

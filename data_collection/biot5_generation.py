@@ -68,36 +68,62 @@ class BioT5DiverseBeamGenerator:
         self,
         *,
         model_name_or_path: str,
-        tokenizer_name: str,
-        base_tokenizer_name: str | None,
-        selfies_vocab_path: str | Path,
         device_name: str,
-        max_source_length: int,
+        max_source_length: int | None = None,
+        model_max_length: int | None = None,
         generation_config: dict[str, Any],
+        tokenizer_name: str | None = None,
+        base_tokenizer_name: str | None = None,
+        selfies_vocab_path: str | Path | None = None,
     ) -> None:
         import torch
-        from transformers import T5ForConditionalGeneration
+        from transformers import T5ForConditionalGeneration, T5Tokenizer
 
-        from src.tokenizer_utils import prepare_training_tokenizer
         from src.training import choose_device
 
+        del tokenizer_name
         del base_tokenizer_name
+        del selfies_vocab_path
 
-        self.training_tokenizer, _ = prepare_training_tokenizer(
-            tokenizer_name=tokenizer_name,
-            selfies_vocab_path=selfies_vocab_path,
+        resolved_model_max_length = self._resolve_model_max_length(
+            generation_config=generation_config,
+            model_max_length=model_max_length,
+            max_source_length=max_source_length,
+        )
+        self.tokenizer = T5Tokenizer.from_pretrained(
+            model_name_or_path,
+            model_max_length=resolved_model_max_length,
         )
         self.device = choose_device(device_name)
-        self.max_source_length = int(max_source_length)
+        self.model_max_length = resolved_model_max_length
+        self.max_source_length = resolved_model_max_length
         self.generation_config = dict(generation_config)
         self.torch = torch
 
         self.model = T5ForConditionalGeneration.from_pretrained(model_name_or_path)
-        if self.model.get_input_embeddings().weight.size(0) != len(self.training_tokenizer):
-            self.model.resize_token_embeddings(len(self.training_tokenizer))
         self.model.to(self.device)
         self.model.eval()
         self.supports_remote_group_beam_search = self._supports_remote_group_beam_search()
+        self.supports_custom_generate = self.supports_remote_group_beam_search
+
+    @staticmethod
+    def _resolve_model_max_length(
+        *,
+        generation_config: dict[str, Any],
+        model_max_length: int | None,
+        max_source_length: int | None,
+    ) -> int:
+        if model_max_length is not None:
+            return int(model_max_length)
+        if max_source_length is not None:
+            return int(max_source_length)
+        if "max_source_length" in generation_config:
+            return int(generation_config["max_source_length"])
+        if "max_length" in generation_config:
+            return int(generation_config["max_length"])
+        if "max_new_tokens" in generation_config:
+            return int(generation_config["max_new_tokens"])
+        return 512
 
     @staticmethod
     def _needs_remote_group_beam_search(exc: Exception) -> bool:
@@ -128,7 +154,7 @@ class BioT5DiverseBeamGenerator:
         )
 
     def generate_candidates(self, prompt_text: str, target_count: int) -> list[str]:
-        encoded = self.training_tokenizer(
+        encoded = self.tokenizer(
             prompt_text,
             return_tensors="pt",
             truncation=True,
@@ -165,7 +191,7 @@ class BioT5DiverseBeamGenerator:
                     **self._remote_group_beam_generation_kwargs(generation_kwargs),
                 )
 
-        raw_outputs = self.training_tokenizer.batch_decode(
+        raw_outputs = self.tokenizer.batch_decode(
             generated_ids,
             skip_special_tokens=False,
             clean_up_tokenization_spaces=True,

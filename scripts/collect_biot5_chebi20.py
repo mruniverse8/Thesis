@@ -16,7 +16,7 @@ from src.io_utils import load_yaml, resolve_path
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Collect grouped ChEBI-20 training molecules with base BioT5+ and diverse beam search."
+        description="Collect grouped ChEBI-20 training molecules with the BioT5+ ChEBI-20 checkpoint and diverse beam search."
     )
     parser.add_argument(
         "--config",

@@ -1,10 +1,8 @@
 seed: 42
 
 model:
-  model_name_or_path: QizhiPei/biot5-plus-base
-  tokenizer_name: QizhiPei/biot5-plus-base
-  base_tokenizer_name: google/t5-v1_1-base
-  selfies_vocab_path: molecules/dict/selfies_dict.txt
+  model_name_or_path: QizhiPei/biot5-plus-base-chebi20
+  model_max_length: 512
   device: auto
 
 data:
@@ -14,8 +12,7 @@ data:
 
 generation:
   target_molecules_per_description: 30
-  max_source_length: 512
-  max_new_tokens: 384
+  max_length: 512
   num_beams: 30
   num_return_sequences: 30
   num_beam_groups: 6

@@ -87,14 +87,21 @@ def collect_biot5_training_data(
     reference_groups = prepare_reference_groups(all_train_records, metric_config)
 
     if generator is None:
+        model_config = config["model"]
+        generation_config = config["generation"]
         generator = BioT5DiverseBeamGenerator(
-            model_name_or_path=config["model"]["model_name_or_path"],
-            tokenizer_name=config["model"]["tokenizer_name"],
-            base_tokenizer_name=config["model"].get("base_tokenizer_name"),
-            selfies_vocab_path=config["model"]["selfies_vocab_path"],
-            device_name=config["model"].get("device", "auto"),
-            max_source_length=int(config["generation"]["max_source_length"]),
-            generation_config=config["generation"],
+            model_name_or_path=model_config["model_name_or_path"],
+            device_name=model_config.get("device", "auto"),
+            model_max_length=int(
+                model_config.get(
+                    "model_max_length",
+                    generation_config.get(
+                        "max_source_length",
+                        generation_config.get("max_length", 512),
+                    ),
+                )
+            ),
+            generation_config=generation_config,
         )
 
     dump_yaml(staging_dir / "resolved_config.yaml", config)

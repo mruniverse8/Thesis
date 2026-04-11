@@ -18,14 +18,14 @@ Each notebook:
 - exports a stage artifact bundle under `/kaggle/working/thesis_artifacts/<stage_name>/`
 
 Exception:
-- `04_biot5_diverse_beam_review.ipynb` is a diagnostic notebook, so it keeps the diverse-beam review logic notebook-local instead of calling a repo CLI.
-- `04_biot5_diverse_beam_review.ipynb` evaluates the native `QizhiPei/biot5-plus-base-chebi20` checkpoint directly, so it does not rebuild a tokenizer from the repo SELFIES vocabulary.
+- `04_biot5_diverse_beam_review.ipynb` is a diagnostic notebook, so it keeps the review loop notebook-local instead of calling a repo CLI.
+- `04_biot5_diverse_beam_review.ipynb` still uses the same active `BioT5DiverseBeamGenerator` contract as collection, so the model, tokenizer, and grouped-beam fallback behavior stay aligned.
 
 ## Notebook Order
 
 1. `00_collect_chebi_biot5.ipynb`
    - downloads and preprocesses ChEBI-20
-   - runs the active BioT5 grouped collection pipeline with diverse beam search
+   - runs the active BioT5 grouped collection pipeline with the `QizhiPei/biot5-plus-base-chebi20` checkpoint and diverse beam search
    - writes `data/post_training/processed/train_multimol.jsonl`
    - exports `thesis_artifacts/collect_chebi_biot5/`
 2. `01_train_sft.ipynb`
@@ -42,7 +42,7 @@ Exception:
    - exports `thesis_artifacts/train_molecule_wise_ppo/`
 5. `04_biot5_diverse_beam_review.ipynb`
    - downloads and preprocesses ChEBI-20 if needed
-   - runs a native BioT5 text2mol review on selected ChEBI descriptions
+   - runs a native BioT5 text2mol review on selected ChEBI descriptions with the same checkpoint-native generator contract used by active collection
    - compares greedy and diverse beam generation with SELFIES-first decoding
    - mirrors the maintained local review style used by the repo notebooks
    - prints timing, SELFIES validity, SMILES validity, and similarity summaries
@@ -56,7 +56,7 @@ Exception:
 - The notebooks are standalone with fallback:
   - they prefer upstream artifacts from `/kaggle/input/...`
   - they fall back to local files in `/kaggle/working/Thesis/...`
-- The collection notebook overrides the active generation config in a diverse-beam-compatible way, so `target_molecules_per_description` stays aligned with `num_return_sequences`.
+- The collection notebook overrides the active generation config in a diverse-beam-compatible way, so `target_molecules_per_description` stays aligned with `num_return_sequences` while keeping the checkpoint-native BioT5 tokenizer/model path intact.
 - The post-training configs in the repo expect grouped validation and test files that are not produced by the ChEBI collection step. The multi-molecule SFT and PPO notebooks therefore derive Kaggle-local split files from the collected grouped train file.
 - The Kaggle configs intentionally reduce batch sizes and iteration counts compared with the local defaults so they are more realistic on smaller Kaggle GPUs.
 - Notebook outputs are written under the cloned repo inside `/kaggle/working/Thesis/outputs/kaggle/`.

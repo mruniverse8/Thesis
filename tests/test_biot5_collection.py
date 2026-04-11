@@ -17,7 +17,7 @@ from src.io_utils import load_yaml, read_jsonl, write_jsonl
 def test_build_diverse_beam_generation_kwargs_matches_alt_defaults() -> None:
     kwargs = build_diverse_beam_generation_kwargs(
         {
-            "max_new_tokens": 384,
+            "max_length": 512,
             "num_beams": 30,
             "num_return_sequences": 30,
             "num_beam_groups": 6,
@@ -30,7 +30,7 @@ def test_build_diverse_beam_generation_kwargs_matches_alt_defaults() -> None:
 
     assert kwargs["do_sample"] is False
     assert kwargs["use_cache"] is True
-    assert kwargs["max_new_tokens"] == 384
+    assert kwargs["max_length"] == 512
     assert kwargs["num_beams"] == 30
     assert kwargs["num_return_sequences"] == 30
     assert kwargs["num_beam_groups"] == 6
@@ -43,7 +43,7 @@ def test_build_diverse_beam_generation_kwargs_rejects_target_mismatch() -> None:
     with pytest.raises(ValueError, match="target_count=4"):
         build_diverse_beam_generation_kwargs(
             {
-                "max_new_tokens": 384,
+                "max_length": 512,
                 "num_beams": 30,
                 "num_return_sequences": 30,
             },
@@ -55,7 +55,7 @@ def test_build_diverse_beam_generation_kwargs_rejects_invalid_beam_groups() -> N
     with pytest.raises(ValueError, match="divisible by num_beam_groups"):
         build_diverse_beam_generation_kwargs(
             {
-                "max_new_tokens": 384,
+                "max_length": 512,
                 "num_beams": 30,
                 "num_return_sequences": 30,
                 "num_beam_groups": 4,
@@ -86,6 +86,57 @@ def test_biot5_diverse_beam_generator_accepts_trust_remote_code_via_kwargs() -> 
     generator.model = DummyModel()
 
     assert generator._supports_remote_group_beam_search() is True
+
+
+def test_biot5_diverse_beam_generator_loads_checkpoint_native_tokenizer(monkeypatch) -> None:
+    import src.training
+    import transformers
+
+    tokenizer_calls: list[tuple[str, int]] = []
+    model_calls: list[str] = []
+
+    class DummyTokenizer:
+        @staticmethod
+        def from_pretrained(model_name_or_path: str, model_max_length: int):
+            tokenizer_calls.append((model_name_or_path, model_max_length))
+            return DummyTokenizer()
+
+    class DummyModel:
+        @staticmethod
+        def from_pretrained(model_name_or_path: str):
+            model_calls.append(model_name_or_path)
+            return DummyModel()
+
+        def to(self, device):
+            self.device = device
+            return self
+
+        def eval(self):
+            return self
+
+        def generate(self, *, custom_generate=None, **kwargs):
+            return []
+
+    monkeypatch.setattr(transformers, "T5Tokenizer", DummyTokenizer)
+    monkeypatch.setattr(transformers, "T5ForConditionalGeneration", DummyModel)
+    monkeypatch.setattr(src.training, "choose_device", lambda device_name: f"resolved:{device_name}")
+
+    generator = BioT5DiverseBeamGenerator(
+        model_name_or_path="QizhiPei/biot5-plus-base-chebi20",
+        device_name="auto",
+        model_max_length=512,
+        generation_config={
+            "max_length": 512,
+            "num_beams": 1,
+            "num_return_sequences": 1,
+        },
+    )
+
+    assert tokenizer_calls == [("QizhiPei/biot5-plus-base-chebi20", 512)]
+    assert model_calls == ["QizhiPei/biot5-plus-base-chebi20"]
+    assert generator.model_max_length == 512
+    assert generator.max_source_length == 512
+    assert generator.device == "resolved:auto"
 
 
 def test_resolve_biot5_collection_config_paths_resolves_relative_paths(tmp_path) -> None:
@@ -142,9 +193,7 @@ def test_collect_biot5_training_data_filters_and_derives_grouped_records(tmp_pat
         "seed": 42,
         "model": {
             "model_name_or_path": "unused-in-test",
-            "tokenizer_name": "unused-in-test",
-            "base_tokenizer_name": "unused-in-test",
-            "selfies_vocab_path": "unused-in-test",
+            "model_max_length": 512,
             "device": "cpu",
         },
         "data": {
@@ -154,8 +203,7 @@ def test_collect_biot5_training_data_filters_and_derives_grouped_records(tmp_pat
         },
         "generation": {
             "target_molecules_per_description": 4,
-            "max_source_length": 512,
-            "max_new_tokens": 384,
+            "max_length": 512,
             "num_beams": 4,
             "num_return_sequences": 4,
             "num_beam_groups": 2,
