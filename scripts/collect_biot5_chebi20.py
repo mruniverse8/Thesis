@@ -23,6 +23,16 @@ def parse_args() -> argparse.Namespace:
         default="configs/collect_biot5_chebi20.yaml",
         help="Path to the BioT5 collection YAML config relative to the project root.",
     )
+    parser.add_argument(
+        "--num-parts",
+        type=int,
+        help="Optional number of contiguous collection partitions to split the selected descriptions into.",
+    )
+    parser.add_argument(
+        "--part-index",
+        type=int,
+        help="Optional 1-based partition index to run from the selected descriptions.",
+    )
     return parser.parse_args()
 
 
@@ -30,6 +40,11 @@ def main() -> None:
     args = parse_args()
     config_path = resolve_path(args.config, PROJECT_ROOT)
     config = resolve_biot5_collection_config_paths(load_yaml(config_path), project_root=PROJECT_ROOT)
+    runtime = config.setdefault("runtime", {})
+    if args.num_parts is not None:
+        runtime["num_parts"] = int(args.num_parts)
+    if args.part_index is not None:
+        runtime["part_index"] = int(args.part_index)
     summary = collect_biot5_training_data(config)
     print(json.dumps(summary, indent=2))
 

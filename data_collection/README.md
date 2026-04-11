@@ -15,6 +15,15 @@ python scripts/download_chebi20.py --output-dir data/chebi20
 python scripts/collect_biot5_chebi20.py --config configs/collect_biot5_chebi20.yaml
 ```
 
+Run one partition of a larger split collection:
+
+```bash
+python scripts/collect_biot5_chebi20.py \
+  --config configs/collect_biot5_chebi20.yaml \
+  --num-parts 3 \
+  --part-index 1
+```
+
 Current defaults in `configs/collect_biot5_chebi20.yaml`:
 
 - model checkpoint: `QizhiPei/biot5-plus-base-chebi20`
@@ -25,6 +34,7 @@ Current defaults in `configs/collect_biot5_chebi20.yaml`:
 - default beam preset: `num_beams=30`, `num_return_sequences=30`, `num_beam_groups=6`, `diversity_penalty=0.5`
 - acceptance threshold: Dice similarity `0.7`
 - retained grouped molecules per description: `8`
+- partition defaults: `num_parts=1`, `part_index=1`
 
 ## Active Outputs
 
@@ -39,6 +49,31 @@ Running the script writes:
 - `data/post_training/processed/train_multimol.jsonl`
 
 The active pipeline still writes the dataset artifacts with `write_jsonl(...)` in `collect_biot5_training_data(...)`; only the generation strategy and SELFIES extraction behavior changed.
+
+When partitioning is enabled, each part writes the same filenames into its own staging directory and summary. The summary also records partition metadata so multiple part runs can be merged later without overlap.
+
+## Partitioned Runs And Merge
+
+For long Kaggle runs, split collection over contiguous partitions of the selected unique descriptions:
+
+1. run part 1 with `--num-parts 3 --part-index 1`
+2. run part 2 with `--num-parts 3 --part-index 2`
+3. run part 3 with `--num-parts 3 --part-index 3`
+4. merge the three outputs with `scripts/merge_biot5_collection_parts.py` or the Kaggle merge notebook
+
+Example merge command:
+
+```bash
+python scripts/merge_biot5_collection_parts.py \
+  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_1_of_3 \
+  --part-derived-train-file data/post_training/processed/train_multimol_part_1_of_3.jsonl \
+  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_2_of_3 \
+  --part-derived-train-file data/post_training/processed/train_multimol_part_2_of_3.jsonl \
+  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_3_of_3 \
+  --part-derived-train-file data/post_training/processed/train_multimol_part_3_of_3.jsonl \
+  --output-dir data_collection/outputs/chebi20_biot5_train_merged \
+  --merged-derived-train-file data/post_training/processed/train_multimol.jsonl
+```
 
 ## SELFIES Extraction Contract
 
@@ -60,16 +95,18 @@ This metadata is recorded in staged artifacts:
 Read the active code in this order:
 
 1. `scripts/collect_biot5_chebi20.py`
-   Loads YAML, resolves paths, and runs `collect_biot5_training_data(...)`.
+   Loads YAML, resolves paths, applies optional partition overrides, and runs `collect_biot5_training_data(...)`.
 2. `data_collection/config_utils.py`
    Resolves repo-relative paths in the collection config.
 3. `data_collection/biot5_generation.py`
    Builds diverse-beam `generate(...)` kwargs, loads the BioT5 ChEBI-20 checkpoint plus its native tokenizer, and handles remote `group-beam-search` fallback when required.
 4. `data_collection/biot5_collection.py`
-   Orchestrates dataset selection, prompt construction, candidate generation, artifact writing, and final grouped dataset export.
-5. `molecules/selfies.py`
+   Orchestrates dataset selection, optional contiguous partitioning, prompt construction, candidate generation, artifact writing, and final grouped dataset export.
+5. `data_collection/biot5_merge.py`
+   Validates compatible part outputs and merges partitioned collection bundles into one merged output folder.
+6. `molecules/selfies.py`
    Owns the shared BioT5 SELFIES cleanup, wrapper stripping, fallback extraction, and decode helpers.
-6. `molecules/collection/filtering.py`
+7. `molecules/collection/filtering.py`
    Validates chemistry, computes Dice similarity, and assigns rejection reasons.
 
 ## Legacy Contrastive Flow

@@ -25,16 +25,16 @@ Exception:
 
 1. `00_collect_chebi_biot5.ipynb`
    - downloads and preprocesses ChEBI-20
-   - runs the active BioT5 grouped collection pipeline with the `QizhiPei/biot5-plus-base-chebi20` checkpoint and diverse beam search
-   - writes `data/post_training/processed/train_multimol.jsonl`
-   - exports `thesis_artifacts/collect_chebi_biot5/`
+   - runs one partition of the active BioT5 grouped collection pipeline with the `QizhiPei/biot5-plus-base-chebi20` checkpoint and diverse beam search
+   - writes part-specific collection outputs and part-specific `train_multimol` JSONL
+   - exports `thesis_artifacts/collect_chebi_biot5_part_<n>/`
 2. `01_train_sft.ipynb`
    - runs standard single-molecule SFT on ChEBI-20
    - stays compatible with the upstream diverse-beam collection stage artifact chain
    - exports `thesis_artifacts/train_sft/`
 3. `02_train_multi_molecule_sft.ipynb`
    - runs staged multi-molecule SFT
-   - derives Kaggle-local grouped train/validation/test splits from the grouped train file produced by the diverse-beam collection stage
+   - derives Kaggle-local grouped train/validation/test splits from the grouped train file produced by the merged collection stage
    - exports `thesis_artifacts/train_multi_molecule_sft/`
 4. `03_train_molecule_wise_ppo.ipynb`
    - runs molecule-stage PPO from the multi-molecule SFT checkpoint
@@ -48,6 +48,11 @@ Exception:
    - prints timing, SELFIES validity, SMILES validity, and similarity summaries
    - writes `raw_generations.jsonl`, `review_rows.jsonl`, and `summary_rows.json`
    - exports `thesis_artifacts/review_biot5_diverse_beam/`
+6. `05_merge_biot5_collection_parts.ipynb`
+   - copies the three partitioned collection stage artifacts into Kaggle-local paths
+   - validates that all three parts come from the same collection config and source dataset
+   - merges staging JSONL files plus the final grouped `train_multimol.jsonl`
+   - exports `thesis_artifacts/merge_biot5_collection_parts/`
 
 ## Important Notes
 
@@ -57,6 +62,7 @@ Exception:
   - they prefer upstream artifacts from `/kaggle/input/...`
   - they fall back to local files in `/kaggle/working/Thesis/...`
 - The collection notebook overrides the active generation config in a diverse-beam-compatible way, so `target_molecules_per_description` stays aligned with `num_return_sequences` while keeping the checkpoint-native BioT5 tokenizer/model path intact.
+- The collection notebook is intended to run three separate part jobs; attach all three exported part datasets to `05_merge_biot5_collection_parts.ipynb` before downstream training.
 - The post-training configs in the repo expect grouped validation and test files that are not produced by the ChEBI collection step. The multi-molecule SFT and PPO notebooks therefore derive Kaggle-local split files from the collected grouped train file.
 - The Kaggle configs intentionally reduce batch sizes and iteration counts compared with the local defaults so they are more realistic on smaller Kaggle GPUs.
 - Notebook outputs are written under the cloned repo inside `/kaggle/working/Thesis/outputs/kaggle/`.

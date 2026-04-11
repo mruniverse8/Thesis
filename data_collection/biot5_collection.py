@@ -55,6 +55,35 @@ def _select_collection_records(
     return selected
 
 
+def _partition_collection_records(
+    records: list[dict[str, Any]],
+    *,
+    num_parts: int,
+    part_index: int,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    num_parts = int(num_parts)
+    part_index = int(part_index)
+    if num_parts < 1:
+        raise ValueError(f"num_parts must be >= 1, got {num_parts}")
+    if part_index < 1 or part_index > num_parts:
+        raise ValueError(f"part_index must be between 1 and {num_parts}, got {part_index}")
+
+    total_records = len(records)
+    base_size, remainder = divmod(total_records, num_parts)
+    start_index = (part_index - 1) * base_size + min(part_index - 1, remainder)
+    part_size = base_size + (1 if part_index <= remainder else 0)
+    end_index = start_index + part_size
+
+    return records[start_index:end_index], {
+        "num_parts": num_parts,
+        "part_index": part_index,
+        "part_description_count": part_size,
+        "part_start_index": start_index,
+        "part_end_index_exclusive": end_index,
+        "total_selected_descriptions_before_partition": total_records,
+    }
+
+
 def collect_biot5_training_data(
     config: dict[str, Any],
     generator: CandidateGenerator | None = None,
@@ -65,10 +94,13 @@ def collect_biot5_training_data(
     train_path = Path(config["data"]["train_file"])
     staging_dir = ensure_dir(config["data"]["staging_dir"])
     derived_train_file = Path(config["data"]["derived_train_file"])
-    description_offset = int(config.get("runtime", {}).get("description_offset", 0))
-    max_descriptions = config.get("runtime", {}).get("max_descriptions")
+    runtime_config = config.get("runtime", {})
+    description_offset = int(runtime_config.get("description_offset", 0))
+    max_descriptions = runtime_config.get("max_descriptions")
     if max_descriptions is not None:
         max_descriptions = int(max_descriptions)
+    num_parts = int(runtime_config.get("num_parts", 1))
+    part_index = int(runtime_config.get("part_index", 1))
 
     metric_config = CollectionMetricConfig(
         fingerprint_radius=int(config["filtering"]["fingerprint_radius"]),
@@ -83,6 +115,11 @@ def collect_biot5_training_data(
         all_train_records,
         description_offset=description_offset,
         max_descriptions=max_descriptions,
+    )
+    selected_records, partition_info = _partition_collection_records(
+        selected_records,
+        num_parts=num_parts,
+        part_index=part_index,
     )
     reference_groups = prepare_reference_groups(all_train_records, metric_config)
 
@@ -234,6 +271,7 @@ def collect_biot5_training_data(
         "target_molecules_per_description": target_molecules,
         "max_molecules_per_example": max_molecules_per_example,
         "rejections_by_reason": dict(sorted(rejection_counts.items())),
+        "partition": partition_info,
         "files": {
             "inputs": str(staging_dir / "inputs.jsonl"),
             "raw_candidates": str(staging_dir / "raw_candidates.jsonl"),

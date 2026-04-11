@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 pytest.importorskip("selfies")
 pytest.importorskip("rdkit")
 
+from data_collection import merge_biot5_collection_parts
 from data_collection.biot5_collection import StaticCandidateGenerator, collect_biot5_training_data
 from data_collection.biot5_generation import (
     BioT5DiverseBeamGenerator,
@@ -308,3 +311,180 @@ def test_collect_biot5_training_data_filters_and_derives_grouped_records(tmp_pat
     assert first_assessment["cleaned_selfies"] == "[C][C][O]"
     assert first_assessment["selected_selfies"] == "[C][C][O]"
     assert first_assessment["used_filter_selfies_fallback"] is False
+
+
+def _build_partition_train_records() -> list[dict[str, str]]:
+    return [
+        {
+            "id": "desc-1",
+            "description": "molecule one",
+            "selfies": "[C]",
+            "source_smiles": "C",
+        },
+        {
+            "id": "desc-2",
+            "description": "molecule two",
+            "selfies": "[C][O]",
+            "source_smiles": "CO",
+        },
+        {
+            "id": "desc-3",
+            "description": "molecule three",
+            "selfies": "[C][C]",
+            "source_smiles": "CC",
+        },
+        {
+            "id": "desc-4",
+            "description": "molecule four",
+            "selfies": "[C][C][O]",
+            "source_smiles": "CCO",
+        },
+        {
+            "id": "desc-5",
+            "description": "molecule five",
+            "selfies": "[C][C][C]",
+            "source_smiles": "CCC",
+        },
+    ]
+
+
+def _build_partition_config(tmp_path: Path, train_file: Path, *, part_index: int) -> dict[str, object]:
+    return {
+        "seed": 42,
+        "model": {
+            "model_name_or_path": "unused-in-test",
+            "model_max_length": 512,
+            "device": "cpu",
+        },
+        "data": {
+            "train_file": str(train_file),
+            "staging_dir": str(tmp_path / f"staging_part_{part_index}"),
+            "derived_train_file": str(
+                tmp_path / "derived" / f"train_multimol_part_{part_index}.jsonl"
+            ),
+        },
+        "generation": {
+            "target_molecules_per_description": 1,
+            "max_length": 512,
+            "num_beams": 1,
+            "num_return_sequences": 1,
+        },
+        "filtering": {
+            "acceptance_dice_threshold": 0.7,
+            "fingerprint_radius": 2,
+            "fingerprint_num_bits": 2048,
+            "max_molecules_per_example": 1,
+        },
+        "runtime": {
+            "description_offset": 0,
+            "max_descriptions": None,
+            "num_parts": 3,
+            "part_index": part_index,
+        },
+    }
+
+
+def _build_partition_generator() -> StaticCandidateGenerator:
+    return StaticCandidateGenerator(
+        {
+            "molecule one": ["[C]"],
+            "molecule two": ["[C][O]"],
+            "molecule three": ["[C][C]"],
+            "molecule four": ["[C][C][O]"],
+            "molecule five": ["[C][C][C]"],
+        }
+    )
+
+
+def test_collect_biot5_training_data_partitions_selected_descriptions(tmp_path) -> None:
+    train_file = tmp_path / "train.jsonl"
+    write_jsonl(train_file, _build_partition_train_records())
+
+    summary = collect_biot5_training_data(
+        _build_partition_config(tmp_path, train_file, part_index=2),
+        generator=_build_partition_generator(),
+    )
+
+    assert summary["selected_descriptions"] == 2
+    assert summary["partition"] == {
+        "num_parts": 3,
+        "part_index": 2,
+        "part_description_count": 2,
+        "part_start_index": 2,
+        "part_end_index_exclusive": 4,
+        "total_selected_descriptions_before_partition": 5,
+    }
+
+    inputs = read_jsonl(tmp_path / "staging_part_2" / "inputs.jsonl")
+    assert [record["id"] for record in inputs] == ["desc-3", "desc-4"]
+
+
+def test_merge_biot5_collection_parts_merges_partition_outputs(tmp_path) -> None:
+    train_file = tmp_path / "train.jsonl"
+    write_jsonl(train_file, _build_partition_train_records())
+
+    part_summaries = []
+    part_staging_dirs = []
+    part_derived_files = []
+    for part_index in (1, 2, 3):
+        config = _build_partition_config(tmp_path, train_file, part_index=part_index)
+        summary = collect_biot5_training_data(config, generator=_build_partition_generator())
+        part_summaries.append(summary)
+        part_staging_dirs.append(config["data"]["staging_dir"])
+        part_derived_files.append(config["data"]["derived_train_file"])
+
+    merged_summary = merge_biot5_collection_parts(
+        part_staging_dirs=part_staging_dirs,
+        part_derived_train_files=part_derived_files,
+        output_dir=tmp_path / "merged" / "collection_outputs",
+        merged_derived_train_file=tmp_path / "merged" / "post_training" / "train_multimol.jsonl",
+    )
+
+    assert [item["partition"]["part_index"] for item in part_summaries] == [1, 2, 3]
+    assert merged_summary["selected_descriptions"] == 5
+    assert merged_summary["descriptions_with_accepted_molecules"] == 5
+    assert merged_summary["derived_examples"] == 5
+    assert merged_summary["partition"] == {
+        "num_parts": 3,
+        "merged_part_indices": [1, 2, 3],
+        "total_selected_descriptions_before_partition": 5,
+    }
+
+    merged_inputs = read_jsonl(tmp_path / "merged" / "collection_outputs" / "inputs.jsonl")
+    merged_derived = read_jsonl(tmp_path / "merged" / "post_training" / "train_multimol.jsonl")
+
+    assert [record["id"] for record in merged_inputs] == [
+        "desc-1",
+        "desc-2",
+        "desc-3",
+        "desc-4",
+        "desc-5",
+    ]
+    assert [record["id"] for record in merged_derived] == [
+        "desc-1",
+        "desc-2",
+        "desc-3",
+        "desc-4",
+        "desc-5",
+    ]
+
+
+def test_merge_biot5_collection_parts_rejects_incomplete_partition_set(tmp_path) -> None:
+    train_file = tmp_path / "train.jsonl"
+    write_jsonl(train_file, _build_partition_train_records())
+
+    part_staging_dirs = []
+    part_derived_files = []
+    for part_index in (1, 3):
+        config = _build_partition_config(tmp_path, train_file, part_index=part_index)
+        collect_biot5_training_data(config, generator=_build_partition_generator())
+        part_staging_dirs.append(config["data"]["staging_dir"])
+        part_derived_files.append(config["data"]["derived_train_file"])
+
+    with pytest.raises(ValueError, match="Expected complete part indices"):
+        merge_biot5_collection_parts(
+            part_staging_dirs=part_staging_dirs,
+            part_derived_train_files=part_derived_files,
+            output_dir=tmp_path / "merged" / "collection_outputs",
+            merged_derived_train_file=tmp_path / "merged" / "post_training" / "train_multimol.jsonl",
+        )
