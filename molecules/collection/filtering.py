@@ -8,7 +8,7 @@ from rdkit import DataStructs
 from molecules.fingerprints import build_morgan_fingerprint
 from molecules.parsing import parse_molecule_text
 from molecules.representations import MoleculeRepresentation
-from molecules.selfies import normalize_generated_selfies, parse_generated_selfies
+from molecules.selfies import decode_biot5_selfies, normalize_generated_selfies
 from src.prompting import normalize_free_text
 
 
@@ -93,16 +93,23 @@ def assess_candidate(
     metric_config: CollectionMetricConfig,
 ) -> dict[str, Any]:
     normalized_prediction = normalize_generated_selfies(raw_prediction_text)
+    decode_result = decode_biot5_selfies(raw_prediction_text)
     assessment = {
         "id": candidate_id,
         "description_id": description_id,
         "description": description,
         "raw_prediction_text": raw_prediction_text,
         "normalized_prediction_selfies": normalized_prediction,
-        "parsed_selfies": None,
-        "decoded_smiles": None,
+        "cleaned_selfies": decode_result["cleaned_selfies"],
+        "parsed_selfies": decode_result["parsed_selfies"],
+        "selected_selfies": decode_result["selected_selfies"],
+        "filtered_selfies": decode_result["filtered_selfies"],
+        "decoded_smiles": decode_result["decoded_smiles"],
         "canonical_smiles": None,
-        "used_repair": False,
+        "used_repair": bool(decode_result["used_filter_selfies_fallback"]),
+        "used_filter_selfies_fallback": bool(decode_result["used_filter_selfies_fallback"]),
+        "is_valid_selfies": bool(decode_result["is_valid_selfies"]),
+        "selfies_decode_error": decode_result["selfies_decode_error"],
         "accepted": False,
         "max_dice_similarity": 0.0,
         "best_reference_smiles": None,
@@ -113,10 +120,8 @@ def assess_candidate(
         assessment["rejection_reason"] = "empty_output"
         return assessment
 
-    selfies_text, decoded_smiles, used_repair = parse_generated_selfies(raw_prediction_text)
-    assessment["parsed_selfies"] = selfies_text
-    assessment["decoded_smiles"] = decoded_smiles
-    assessment["used_repair"] = used_repair
+    selfies_text = decode_result["selected_selfies"]
+    decoded_smiles = decode_result["decoded_smiles"]
 
     if not selfies_text or not decoded_smiles:
         assessment["rejection_reason"] = "invalid_selfies"

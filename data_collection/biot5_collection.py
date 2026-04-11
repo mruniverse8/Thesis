@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
-import inspect
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol, Sequence
+from typing import Any, Protocol
 
 from tqdm import tqdm
 
@@ -12,41 +11,16 @@ from molecules.collection.filtering import (
     assess_candidate,
     prepare_reference_groups,
 )
-from molecules.selfies import normalize_generated_selfies
+from molecules.selfies import decode_biot5_selfies
 from src.io_utils import dump_yaml, ensure_dir, read_jsonl, set_seed, write_json, write_jsonl
 from src.prompting import build_text2mol_prompt, normalize_free_text
 
-if TYPE_CHECKING:
-    import torch
+from .biot5_generation import BioT5DiverseBeamGenerator, build_diverse_beam_generation_kwargs
 
 
 class CandidateGenerator(Protocol):
     def generate_candidates(self, prompt_text: str, target_count: int) -> list[str]:
         ...
-
-
-def build_contrastive_generation_kwargs(
-    generation_config: dict[str, Any],
-    *,
-    bad_words_ids: Sequence[Sequence[int]] | None = None,
-) -> dict[str, Any]:
-    penalty_alpha = float(generation_config["penalty_alpha"])
-    top_k = int(generation_config["top_k"])
-    if penalty_alpha <= 0:
-        raise ValueError("contrastive search requires `penalty_alpha > 0`")
-    if top_k <= 1:
-        raise ValueError("contrastive search requires `top_k > 1`")
-
-    kwargs: dict[str, Any] = {
-        "max_new_tokens": int(generation_config["max_new_tokens"]),
-        "do_sample": False,
-        "num_beams": 1,
-        "penalty_alpha": penalty_alpha,
-        "top_k": top_k,
-    }
-    if bad_words_ids:
-        kwargs["bad_words_ids"] = [list(item) for item in bad_words_ids if item]
-    return kwargs
 
 
 class StaticCandidateGenerator:
@@ -58,132 +32,6 @@ class StaticCandidateGenerator:
             if description in prompt_text:
                 return list(outputs[:target_count])
         raise AssertionError(f"Unexpected prompt text: {prompt_text}")
-
-
-class BioT5ContrastiveGenerator:
-    def __init__(
-        self,
-        *,
-        model_name_or_path: str,
-        tokenizer_name: str,
-        base_tokenizer_name: str,
-        selfies_vocab_path: str | Path,
-        device_name: str,
-        max_source_length: int,
-        generation_config: dict[str, Any],
-    ) -> None:
-        import torch
-        from transformers import T5ForConditionalGeneration
-
-        from src.tokenizer_utils import build_decoder_tokenizer, prepare_training_tokenizer
-        from src.training import choose_device
-
-        self.training_tokenizer, _ = prepare_training_tokenizer(
-            tokenizer_name=tokenizer_name,
-            selfies_vocab_path=selfies_vocab_path,
-        )
-        self.decoder_tokenizer = build_decoder_tokenizer(
-            base_tokenizer_name=base_tokenizer_name,
-            training_tokenizer=self.training_tokenizer,
-        )
-        self.device = choose_device(device_name)
-        self.max_source_length = int(max_source_length)
-        self.generation_config = dict(generation_config)
-        self.torch = torch
-
-        self.model = T5ForConditionalGeneration.from_pretrained(model_name_or_path)
-        if self.model.get_input_embeddings().weight.size(0) != len(self.training_tokenizer):
-            self.model.resize_token_embeddings(len(self.training_tokenizer))
-        self.model.to(self.device)
-        self.model.eval()
-        self.use_remote_contrastive_search = self._supports_remote_contrastive_search()
-
-    @staticmethod
-    def _needs_remote_contrastive_search(exc: Exception) -> bool:
-        message = str(exc)
-        return (
-            "Contrastive Search requires `trust_remote_code=True`" in message
-            or "transformers-community/contrastive-search" in message
-        )
-
-    @staticmethod
-    def _remote_contrastive_generation_kwargs(generation_kwargs: dict[str, Any]) -> dict[str, Any]:
-        remote_kwargs = dict(generation_kwargs)
-        remote_kwargs["custom_generate"] = "transformers-community/contrastive-search"
-        remote_kwargs["trust_remote_code"] = True
-        return remote_kwargs
-
-    def _supports_remote_contrastive_search(self) -> bool:
-        try:
-            parameters = inspect.signature(self.model.generate).parameters
-        except (TypeError, ValueError):
-            return False
-        return "custom_generate" in parameters and "trust_remote_code" in parameters
-
-    def _blocked_sequence_ids(self, generated_ids: Sequence[int]) -> list[int]:
-        decoder_start_token_id = getattr(self.model.config, "decoder_start_token_id", None)
-        eos_token_id = self.training_tokenizer.eos_token_id
-        pad_token_id = self.training_tokenizer.pad_token_id
-
-        cleaned: list[int] = []
-        for token_id in generated_ids:
-            if decoder_start_token_id is not None and token_id == decoder_start_token_id and not cleaned:
-                continue
-            if pad_token_id is not None and token_id == pad_token_id and not cleaned:
-                continue
-            cleaned.append(int(token_id))
-            if eos_token_id is not None and token_id == eos_token_id:
-                break
-
-        while cleaned and pad_token_id is not None and cleaned[-1] == pad_token_id:
-            cleaned.pop()
-        return cleaned
-
-    def generate_candidates(self, prompt_text: str, target_count: int) -> list[str]:
-        encoded = self.training_tokenizer(
-            prompt_text,
-            return_tensors="pt",
-            truncation=True,
-            max_length=self.max_source_length,
-        )
-        encoded = {key: value.to(self.device) for key, value in encoded.items()}
-
-        raw_outputs: list[str] = []
-        blocked_sequences: list[list[int]] = []
-        seen_blocked_sequences: set[tuple[int, ...]] = set()
-
-        for _ in range(int(target_count)):
-            generation_kwargs = build_contrastive_generation_kwargs(
-                self.generation_config,
-                bad_words_ids=blocked_sequences,
-            )
-            if self.use_remote_contrastive_search:
-                generation_kwargs = self._remote_contrastive_generation_kwargs(generation_kwargs)
-            with self.torch.no_grad():
-                try:
-                    generated_ids = self.model.generate(**encoded, **generation_kwargs)
-                except ValueError as exc:
-                    if self.use_remote_contrastive_search or not self._needs_remote_contrastive_search(exc):
-                        raise
-                    generated_ids = self.model.generate(
-                        **encoded,
-                        **self._remote_contrastive_generation_kwargs(generation_kwargs),
-                    )
-
-            raw_text = self.decoder_tokenizer.batch_decode(
-                generated_ids,
-                skip_special_tokens=True,
-                clean_up_tokenization_spaces=True,
-            )[0]
-            raw_outputs.append(raw_text)
-
-            blocked = self._blocked_sequence_ids(generated_ids[0].tolist())
-            blocked_key = tuple(blocked)
-            if blocked and blocked_key not in seen_blocked_sequences:
-                blocked_sequences.append(blocked)
-                seen_blocked_sequences.add(blocked_key)
-
-        return raw_outputs
 
 
 def _select_collection_records(
@@ -239,10 +87,10 @@ def collect_biot5_training_data(
     reference_groups = prepare_reference_groups(all_train_records, metric_config)
 
     if generator is None:
-        generator = BioT5ContrastiveGenerator(
+        generator = BioT5DiverseBeamGenerator(
             model_name_or_path=config["model"]["model_name_or_path"],
             tokenizer_name=config["model"]["tokenizer_name"],
-            base_tokenizer_name=config["model"]["base_tokenizer_name"],
+            base_tokenizer_name=config["model"].get("base_tokenizer_name"),
             selfies_vocab_path=config["model"]["selfies_vocab_path"],
             device_name=config["model"].get("device", "auto"),
             max_source_length=int(config["generation"]["max_source_length"]),
@@ -283,6 +131,7 @@ def collect_biot5_training_data(
 
         for candidate_index, raw_prediction in enumerate(raw_predictions):
             candidate_id = f"{description_id}-candidate-{candidate_index:03d}"
+            decode_result = decode_biot5_selfies(raw_prediction)
             raw_candidate_records.append(
                 {
                     "id": candidate_id,
@@ -290,7 +139,11 @@ def collect_biot5_training_data(
                     "description": description,
                     "candidate_index": candidate_index,
                     "raw_prediction_text": raw_prediction,
-                    "normalized_prediction_selfies": normalize_generated_selfies(raw_prediction),
+                    "normalized_prediction_selfies": decode_result["cleaned_selfies"],
+                    "cleaned_prediction_selfies": decode_result["cleaned_selfies"],
+                    "filtered_prediction_selfies": decode_result["filtered_selfies"],
+                    "selected_prediction_selfies": decode_result["selected_selfies"],
+                    "used_filter_selfies_fallback": decode_result["used_filter_selfies_fallback"],
                 }
             )
 
@@ -365,6 +218,7 @@ def collect_biot5_training_data(
         "staging_dir": str(staging_dir),
         "derived_train_file": str(derived_train_file),
         "seed": seed,
+        "generation_strategy": "diverse_beam_search",
         "selected_descriptions": len(selected_records),
         "descriptions_with_accepted_molecules": len(accepted_grouped_records),
         "raw_candidates": len(raw_candidate_records),
@@ -385,3 +239,12 @@ def collect_biot5_training_data(
     }
     write_json(staging_dir / "summary.json", summary)
     return summary
+
+
+__all__ = [
+    "BioT5DiverseBeamGenerator",
+    "CandidateGenerator",
+    "StaticCandidateGenerator",
+    "build_diverse_beam_generation_kwargs",
+    "collect_biot5_training_data",
+]
