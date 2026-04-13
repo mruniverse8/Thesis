@@ -20,7 +20,7 @@ Run one partition of a larger split collection:
 ```bash
 python scripts/collect_biot5_chebi20.py \
   --config configs/collect_biot5_chebi20.yaml \
-  --num-parts 3 \
+  --num-parts 5 \
   --part-index 1
 ```
 
@@ -56,21 +56,27 @@ When partitioning is enabled, each part writes the same filenames into its own s
 
 For long Kaggle runs, split collection over contiguous partitions of the selected unique descriptions:
 
-1. run part 1 with `--num-parts 3 --part-index 1`
-2. run part 2 with `--num-parts 3 --part-index 2`
-3. run part 3 with `--num-parts 3 --part-index 3`
-4. merge the three outputs with `scripts/merge_biot5_collection_parts.py` or the Kaggle merge notebook
+1. run part 1 with `--num-parts 5 --part-index 1`
+2. run part 2 with `--num-parts 5 --part-index 2`
+3. run part 3 with `--num-parts 5 --part-index 3`
+4. run part 4 with `--num-parts 5 --part-index 4`
+5. run part 5 with `--num-parts 5 --part-index 5`
+6. merge the five outputs with `scripts/merge_biot5_collection_parts.py` or the Kaggle merge notebook
 
 Example merge command:
 
 ```bash
 python scripts/merge_biot5_collection_parts.py \
-  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_1_of_3 \
-  --part-derived-train-file data/post_training/processed/train_multimol_part_1_of_3.jsonl \
-  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_2_of_3 \
-  --part-derived-train-file data/post_training/processed/train_multimol_part_2_of_3.jsonl \
-  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_3_of_3 \
-  --part-derived-train-file data/post_training/processed/train_multimol_part_3_of_3.jsonl \
+  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_1_of_5 \
+  --part-derived-train-file data/post_training/processed/train_multimol_part_1_of_5.jsonl \
+  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_2_of_5 \
+  --part-derived-train-file data/post_training/processed/train_multimol_part_2_of_5.jsonl \
+  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_3_of_5 \
+  --part-derived-train-file data/post_training/processed/train_multimol_part_3_of_5.jsonl \
+  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_4_of_5 \
+  --part-derived-train-file data/post_training/processed/train_multimol_part_4_of_5.jsonl \
+  --part-staging-dir data_collection/outputs/chebi20_biot5_train_part_5_of_5 \
+  --part-derived-train-file data/post_training/processed/train_multimol_part_5_of_5.jsonl \
   --output-dir data_collection/outputs/chebi20_biot5_train_merged \
   --merged-derived-train-file data/post_training/processed/train_multimol.jsonl
 ```

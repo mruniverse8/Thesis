@@ -26,6 +26,7 @@ The active repo surface is focused on dataset preparation, training, post-traini
 - `scripts/download_chebi20.py`: download and preprocess ChEBI-20-MM into local JSONL splits
 - `configs/collect_biot5_chebi20.yaml`: BioT5+ data-collection config for ChEBI-20 train descriptions
 - `scripts/collect_biot5_chebi20.py`: collect grouped training molecules with the BioT5+ ChEBI-20 checkpoint and filtering
+- `scripts/merge_biot5_collection_parts.py`: merge partitioned BioT5 collection runs into one final grouped bundle
 - `scripts/download_lpm24.py`: download and preprocess LPM-24 into grouped multi-molecule JSONL files
 - `scripts/train_sft.py`: run description-to-SELFIES SFT
 - `post_training/`: architecture specs for multi-molecule SFT and molecule-wise PPO
@@ -88,7 +89,7 @@ python scripts/train_molecule_wise_ppo.py --config configs/molecule_wise_ppo.yam
 
 ## Pipeline Notes
 
-- Data collection uses the BioT5+ ChEBI-20 checkpoint, its checkpoint-native tokenizer, diverse beam search, SELFIES-first wrapper-token cleanup, RDKit validation, similarity acceptance, and canonical-SMILES deduplication.
+- Data collection uses the BioT5+ ChEBI-20 checkpoint, its checkpoint-native tokenizer, diverse beam search, SELFIES-first wrapper-token cleanup, RDKit validation, similarity acceptance, canonical-SMILES deduplication, and optional contiguous run partitioning for long collection jobs.
 - The ChEBI collection step derives grouped multi-molecule training data at `data/post_training/processed/train_multimol.jsonl`.
 - Training uses a custom PyTorch loop around `T5ForConditionalGeneration`.
 - Prompts follow the BioT5+ text-to-molecule format.

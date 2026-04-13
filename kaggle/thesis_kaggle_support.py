@@ -268,8 +268,6 @@ def ensure_grouped_split_files(
     return paths
 
 
-
-
 def create_zip_archive(source_path: str | Path, destination_path: str | Path) -> Path:
     source_root = Path(source_path)
     if not source_root.exists():

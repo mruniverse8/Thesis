@@ -12,7 +12,7 @@ Each notebook:
 - clones this repo with HTTPS into `/kaggle/working/Thesis`
 - installs the Python dependencies needed by the repo
 - checks for `torch`, `rdkit`, `transformers`, `datasets`, and `peft`
-- imports shared notebook helpers from the repo-root module `thesis_kaggle_support.py`
+- imports shared notebook helpers from `kaggle/thesis_kaggle_support.py` through the repo-root compatibility module `thesis_kaggle_support.py`
 - writes a Kaggle-local temporary YAML config under `kaggle/generated_configs/`
 - runs the existing repo CLI entrypoint instead of duplicating training logic
 - exports a stage artifact bundle under `/kaggle/working/thesis_artifacts/<stage_name>/`
@@ -20,6 +20,7 @@ Each notebook:
 Exception:
 - `04_biot5_diverse_beam_review.ipynb` is a diagnostic notebook, so it keeps the review loop notebook-local instead of calling a repo CLI.
 - `04_biot5_diverse_beam_review.ipynb` still uses the same active `BioT5DiverseBeamGenerator` contract as collection, so the model, tokenizer, and grouped-beam fallback behavior stay aligned.
+- `06_biot5_mini_dataset_review.ipynb` keeps the review loop notebook-local on purpose, still samples review examples directly from processed ChEBI-20, and now also packages a small grouped `train_multimol` subset for post-training debugging.
 
 ## Notebook Order
 
@@ -28,6 +29,7 @@ Exception:
    - runs one partition of the active BioT5 grouped collection pipeline with the `QizhiPei/biot5-plus-base-chebi20` checkpoint and diverse beam search
    - writes part-specific collection outputs and part-specific `train_multimol` JSONL
    - exports `thesis_artifacts/collect_chebi_biot5_part_<n>/`
+   - writes `thesis_artifacts/collect_chebi_biot5_part_<n>.zip` so each part can be downloaded and re-uploaded later
 2. `01_train_sft.ipynb`
    - runs standard single-molecule SFT on ChEBI-20
    - stays compatible with the upstream diverse-beam collection stage artifact chain
@@ -49,10 +51,31 @@ Exception:
    - writes `raw_generations.jsonl`, `review_rows.jsonl`, and `summary_rows.json`
    - exports `thesis_artifacts/review_biot5_diverse_beam/`
 6. `05_merge_biot5_collection_parts.ipynb`
-   - copies the three partitioned collection stage artifacts into Kaggle-local paths
-   - validates that all three parts come from the same collection config and source dataset
+   - copies the partitioned collection stage artifacts into Kaggle-local paths
+   - expects an attached dataset containing extracted part folders under `thesis_artifacts/collect_chebi_biot5_part_<n>/`
+   - validates that all attached parts come from the same collection config and source dataset
    - merges staging JSONL files plus the final grouped `train_multimol.jsonl`
    - exports `thesis_artifacts/merge_biot5_collection_parts/`
+7. `06_biot5_mini_dataset_review.ipynb`
+   - downloads and preprocesses ChEBI-20 if needed
+   - samples 128 random train description IDs with a fixed seed directly from `train.jsonl`
+   - runs the native BioT5 review loop with the same review-format outputs used by the local notebooks
+   - copies `post_training_processed/train_multimol.jsonl` from the merged collection artifact if needed
+   - samples 128 grouped multi-molecule examples, derives ready-to-train grouped split files, and writes a post-training config snapshot
+   - writes `raw_generations.jsonl`, `review_rows.jsonl`, `summary_rows.json`, and `config_snapshot.json` under `outputs/kaggle/mini_dataset/`
+   - writes `mini_grouped_train_multimol.jsonl` and `config_snapshot.json` under `outputs/kaggle/mini_post_training/`
+   - exports `thesis_artifacts/mini_dataset_biot5_review/` and writes `thesis_artifacts/mini_dataset_biot5_review.zip`
+   - exports `thesis_artifacts/mini_post_training/` and writes `thesis_artifacts/mini-post-training.zip`
+
+## Zipped Part Tutorial
+
+1. Run `00_collect_chebi_biot5.ipynb` five times with `PART_INDEX = 1, 2, 3, 4, 5`.
+2. Download each `collect_chebi_biot5_part_<n>.zip` from `/kaggle/working/thesis_artifacts/`.
+3. Create one local folder named `thesis_artifacts`.
+4. Extract every part zip into that same folder so it contains `thesis_artifacts/collect_chebi_biot5_part_1/` through `thesis_artifacts/collect_chebi_biot5_part_5/`.
+5. Upload that parent `thesis_artifacts/` folder as one Kaggle dataset.
+6. Attach that dataset to `05_merge_biot5_collection_parts.ipynb`.
+7. Run `05_merge_biot5_collection_parts.ipynb`; it will resolve `thesis_artifacts/<stage_name>/...` automatically.
 
 ## Important Notes
 
@@ -62,8 +85,10 @@ Exception:
   - they prefer upstream artifacts from `/kaggle/input/...`
   - they fall back to local files in `/kaggle/working/Thesis/...`
 - The collection notebook overrides the active generation config in a diverse-beam-compatible way, so `target_molecules_per_description` stays aligned with `num_return_sequences` while keeping the checkpoint-native BioT5 tokenizer/model path intact.
-- The collection notebook is intended to run three separate part jobs; attach all three exported part datasets to `05_merge_biot5_collection_parts.ipynb` before downstream training.
-- The post-training configs in the repo expect grouped validation and test files that are not produced by the ChEBI collection step. The multi-molecule SFT and PPO notebooks therefore derive Kaggle-local split files from the collected grouped train file.
+- The collection notebook is intended to run five separate part jobs by default; for the smoothest manual handoff, upload one dataset whose root contains `thesis_artifacts/collect_chebi_biot5_part_<n>/` for all five parts.
+- The mini-dataset review notebook still keeps the review loop standalone, but it now exports two bundles: the review artifact from processed `train.jsonl` and a grouped post-training debug artifact.
+- The `mini-post-training.zip` bundle depends on grouped `train_multimol.jsonl`; attach the merged collection artifact dataset or keep `data/post_training/processed/train_multimol.jsonl` available in the repo clone.
+- The post-training configs in the repo expect grouped validation and test files that are not produced by the ChEBI collection step. The multi-molecule SFT and PPO notebooks derive Kaggle-local split files from the collected grouped train file, and `06_biot5_mini_dataset_review.ipynb` now packages a small version of those grouped splits directly for debugging.
 - The Kaggle configs intentionally reduce batch sizes and iteration counts compared with the local defaults so they are more realistic on smaller Kaggle GPUs.
 - Notebook outputs are written under the cloned repo inside `/kaggle/working/Thesis/outputs/kaggle/`.
 - To hand outputs from one notebook to the next in fresh Kaggle sessions, publish the relevant stage folder from `/kaggle/working/thesis_artifacts/` as a Kaggle dataset and attach it to the downstream notebook.
