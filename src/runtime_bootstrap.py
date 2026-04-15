@@ -260,22 +260,3 @@ def build_dataset_prep_command(
     else:
         command.append("--skip-existing")
     return dataset_kind, command
-
-
-def build_training_command(
-    *,
-    repo_dir: str | Path,
-    stage_spec: StageSpec,
-    config_path: str | Path,
-    extra_script_args: Sequence[str] | None = None,
-) -> list[str]:
-    repo_root = resolve_repo_dir(repo_dir)
-    command = [
-        sys.executable,
-        str(repo_root / stage_spec.training_script),
-        "--config",
-        str(Path(config_path).resolve()),
-    ]
-    if extra_script_args:
-        command.extend(extra_script_args)
-    return command

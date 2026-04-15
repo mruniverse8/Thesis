@@ -12,6 +12,7 @@ tqdm>=4.66.0
 # Optional but required for LoRA-based PPO training in post_training/:
 peft>=0.12.0
 # Optional experiment tracking backends for post_training:
+protobuf>=7.34.1
 wandb>=0.17.0
 gdown
 requests>=2.31.0

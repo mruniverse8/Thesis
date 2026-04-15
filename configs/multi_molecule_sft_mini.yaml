@@ -1,7 +1,7 @@
 seed: 42
 
 tracking:
-  enabled: false
+  enabled: true
   backend: wandb
   project: Thesis-1
   workspace: koala-team

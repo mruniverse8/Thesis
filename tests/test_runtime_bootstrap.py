@@ -9,7 +9,6 @@ from src.runtime_bootstrap import (
     DEFAULT_TRAIN_DATASET_FILE_ID,
     STAGE_SPECS,
     build_dataset_prep_command,
-    build_training_command,
     infer_managed_dataset,
     resolve_stage_config_path,
 )
@@ -87,6 +86,12 @@ def test_resolve_stage_config_path_uses_stage_default(tmp_path: Path) -> None:
     resolved = resolve_stage_config_path(repo_dir, STAGE_SPECS["multi_sft"])
 
     assert resolved == (repo_dir / "configs" / "multi_molecule_sft_mini.yaml").resolve()
+
+
+def test_stage_specs_use_expected_training_scripts() -> None:
+    assert STAGE_SPECS["sft"].training_script == Path("scripts") / "train_sft.py"
+    assert STAGE_SPECS["multi_sft"].training_script == Path("scripts") / "train_multi_molecule_sft.py"
+    assert STAGE_SPECS["ppo"].training_script == Path("scripts") / "train_molecule_wise_ppo.py"
 
 
 def test_infer_managed_dataset_detects_chebi_sft(tmp_path: Path) -> None:
@@ -167,19 +172,3 @@ def test_build_dataset_prep_command_builds_chebi_download_for_sft(tmp_path: Path
     assert command is not None
     assert command[1].endswith("scripts/download_chebi20.py")
     assert command[-1].endswith("data/chebi20")
-
-
-def test_build_training_command_uses_stage_script_and_forwards_extra_args(tmp_path: Path) -> None:
-    repo_dir = _make_repo(tmp_path)
-    config_path = repo_dir / "configs" / "molecule_wise_ppo_mini.yaml"
-
-    command = build_training_command(
-        repo_dir=repo_dir,
-        stage_spec=STAGE_SPECS["ppo"],
-        config_path=config_path,
-        extra_script_args=["--max-steps", "10"],
-    )
-
-    assert command[1].endswith("scripts/train_molecule_wise_ppo.py")
-    assert command[2:4] == ["--config", str(config_path.resolve())]
-    assert command[-2:] == ["--max-steps", "10"]

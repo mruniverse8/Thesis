@@ -30,8 +30,8 @@ The active repo surface is focused on dataset preparation, training, post-traini
 - `scripts/merge_biot5_collection_parts.py`: merge partitioned BioT5 collection runs into one final grouped bundle
 - `scripts/download_lpm24.py`: download and preprocess LPM-24 into grouped multi-molecule JSONL files
 - `scripts/train_sft.py`: run description-to-SELFIES SFT
-- `scripts/init_colab.py`: bootstrap a Colab runtime and launch one training stage
-- `scripts/init_kaggle.py`: bootstrap a Kaggle runtime and launch one training stage
+- `scripts/init_colab.py`: bootstrap a Colab runtime and prepare one training stage
+- `scripts/init_kaggle.py`: bootstrap a Kaggle runtime and prepare one training stage
 - `colab/`: Colab-specific support helpers and run notes
 - `kaggle/`: Kaggle-specific support helpers and run notes
 - `post_training/`: architecture specs for multi-molecule SFT and molecule-wise PPO
@@ -85,15 +85,15 @@ Train the post-training multi-molecule SFT stage:
 
 ```bash
 python scripts/train_multi_molecule_sft.py --config configs/multi_molecule_sft.yaml
-python scripts/init_colab.py --stage multi_sft
 ```
 
 Train molecule-wise PPO from the multi-molecule SFT checkpoint:
 
 ```bash
 python scripts/train_molecule_wise_ppo.py --config configs/molecule_wise_ppo.yaml
-python scripts/init_kaggle.py --stage ppo
 ```
+
+For notebook runtimes, `scripts/init_colab.py` and `scripts/init_kaggle.py` are bootstrap helpers for repo setup, dependency installation, and managed dataset preparation; notebooks should invoke the training scripts directly.
 
 ## Pipeline Notes
 

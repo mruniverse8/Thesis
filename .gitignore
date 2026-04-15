@@ -14,3 +14,7 @@ data/lpm24/processed/*.json
 data/post_training/processed/*.jsonl
 data/post_training/processed/*.json
 data_collection/outputs/
+tmp/
+legacy/
+external/
+data/big_post_training/

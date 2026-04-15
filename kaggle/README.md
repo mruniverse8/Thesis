@@ -10,10 +10,11 @@ The notebooks are designed to be uploaded directly to Kaggle and run top-to-bott
 The new low-noise bootstrap path is:
 
 - clone the repo into `/kaggle/working/Thesis`
-- run `python scripts/init_kaggle.py --stage <sft|multi_sft|ppo>`
-- let the script install requirements, prepare the managed dataset when needed, and launch the selected training entrypoint
+- optionally run `python scripts/init_kaggle.py --stage <sft|multi_sft|ppo>`
+- let the script install requirements and prepare the managed dataset when needed
+- run the training script directly with the selected config
 
-The existing notebooks still work, but the init script is the preferred way to keep setup cells short.
+The existing notebooks already follow the direct training-script pattern; the init script is only a bootstrap helper.
 
 Each notebook:
 

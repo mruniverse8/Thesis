@@ -6,7 +6,7 @@ tracking:
   project: Thesis-1
   workspace: koala-team
   run_name:
-  tags: []
+  tags: ["part2"]
 
 model:
   name: QizhiPei/biot5-plus-base
@@ -16,16 +16,16 @@ model:
   molecule_separator_token: <mol_sep>
 
 data:
-  train_file: data/post_training/processed/train_multimol.jsonl
-  validation_file: data/post_training/processed/validation_multimol.jsonl
-  test_file: data/post_training/processed/test_multimol.jsonl
+  train_file: data/big_post_training/grouped_splits/train_multimol.jsonl
+  validation_file: data/big_post_training/grouped_splits/validation_multimol.jsonl
+  test_file: data/big_post_training/grouped_splits/test_multimol.jsonl
   max_source_length: 512
   max_target_length: 768
   max_molecules_per_sequence: 8
   num_workers: 2
 
 training:
-  output_dir: outputs/multi_molecule_sft
+  output_dir: outputs/multi_molecule_sft_part2
   device: auto
   mixed_precision: auto
   per_device_train_batch_size: 2

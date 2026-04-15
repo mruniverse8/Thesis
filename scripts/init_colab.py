@@ -16,12 +16,10 @@ from src.runtime_bootstrap import (
     DEFAULT_REPO_URL,
     DEFAULT_TRAIN_DATASET_FILE_ID,
     build_dataset_prep_command,
-    build_training_command,
     clone_or_update_repo,
     install_repo_requirements,
     json_dumps,
     print_json_status,
-    resolve_repo_dir,
     resolve_stage_config_path,
     resolve_stage_spec,
     run_command,
@@ -30,8 +28,13 @@ from src.runtime_bootstrap import (
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Initialize a Colab runtime and launch one thesis training stage.")
-    parser.add_argument("--stage", required=True, choices=("sft", "multi_sft", "ppo"), help="Training stage to run.")
+    parser = argparse.ArgumentParser(description="Initialize a Colab runtime and prepare one thesis training stage.")
+    parser.add_argument(
+        "--stage",
+        required=True,
+        choices=("sft", "multi_sft", "ppo"),
+        help="Training stage to prepare.",
+    )
     parser.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="HTTPS Git URL for the thesis repo.")
     parser.add_argument("--repo-branch", default=DEFAULT_REPO_BRANCH, help="Git branch to fetch and run.")
     parser.add_argument(
@@ -55,19 +58,7 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TRAIN_DATASET_FILE_ID,
         help="Google Drive file id used by the mini post-training dataset downloader.",
     )
-    parser.add_argument(
-        "--extra-script-args",
-        nargs=argparse.REMAINDER,
-        default=[],
-        help="Additional arguments forwarded to the underlying training script. Prefix with --extra-script-args -- ...",
-    )
     return parser.parse_args()
-
-
-def _normalize_extra_args(values: list[str]) -> list[str]:
-    if values and values[0] == "--":
-        return values[1:]
-    return values
 
 
 def main() -> None:
@@ -101,14 +92,13 @@ def main() -> None:
     )
     if dataset_command is not None:
         run_command(dataset_command, cwd=repo_dir)
-
-    training_command = build_training_command(
-        repo_dir=repo_dir,
-        stage_spec=stage_spec,
-        config_path=config_path,
-        extra_script_args=_normalize_extra_args(args.extra_script_args),
+    print_json_status(
+        "bootstrap_complete",
+        stage=args.stage,
+        repo_dir=str(repo_dir),
+        config_path=str(config_path),
+        training_script=str(repo_dir / stage_spec.training_script),
     )
-    run_command(training_command, cwd=repo_dir)
 
 
 if __name__ == "__main__":

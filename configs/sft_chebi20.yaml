@@ -1,5 +1,13 @@
 seed: 42
 
+tracking:
+  enabled: true
+  backend: wandb
+  project: Thesis-1
+  workspace: koala-team
+  run_name:
+  tags: []
+
 model:
   name: QizhiPei/biot5-plus-base
   tokenizer_name: QizhiPei/biot5-plus-base
