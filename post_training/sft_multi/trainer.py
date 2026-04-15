@@ -21,6 +21,7 @@ from src.training import (
     resolve_mixed_precision,
 )
 
+from post_training.logging import BaseTracker, NullTracker, build_tracker
 from post_training.shared.config import resolve_multi_molecule_sft_config_paths
 
 from .checkpointing import prepare_sft_output_dir, save_sft_checkpoint, write_sft_history
@@ -53,6 +54,29 @@ def build_multi_molecule_dataloader(
         collate_fn=collator,
         pin_memory=device.type == "cuda",
     )
+
+
+def _build_sft_tracking_config_payload(
+    config: dict[str, Any],
+    *,
+    output_dir: str | Path,
+) -> dict[str, Any]:
+    return {
+        "stage_name": "multi_molecule_sft",
+        "output_dir": str(output_dir),
+        "seed": config.get("seed"),
+        "resolved_config": config,
+    }
+
+
+def _build_sft_tracking_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "best_validation_loss": summary["best_validation_loss"],
+        "device": summary["device"],
+        "mixed_precision": summary["mixed_precision"],
+        "tokenizer_vocab_size": summary["tokenizer_vocab_size"],
+        "output_dir": summary["output_dir"],
+    }
 
 
 def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
@@ -116,116 +140,131 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
         tokenizer_metadata=tokenizer_metadata,
     )
 
+    tracker: BaseTracker = NullTracker()
     history: list[dict[str, Any]] = []
     best_validation_loss = float("inf")
     global_step = 0
 
-    for epoch in range(1, int(training_config["num_epochs"]) + 1):
-        model.train()
-        optimizer.zero_grad(set_to_none=True)
+    try:
+        tracker = build_tracker(
+            config,
+            stage_name="multi_molecule_sft",
+            output_dir=output_dir,
+        )
+        tracker.log_config(_build_sft_tracking_config_payload(config, output_dir=output_dir))
 
-        train_loss_sum = 0.0
-        train_examples = 0
-
-        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}", leave=False)
-        for batch_index, batch in enumerate(progress_bar, start=1):
-            tensor_batch = move_tensor_batch_to_device(batch, device)
-            batch_size = tensor_batch["input_ids"].size(0)
-
-            with autocast_context(device, mixed_precision):
-                outputs = model(**tensor_batch)
-                raw_loss = outputs.loss
-                loss = raw_loss / gradient_accumulation_steps
-
-            if use_grad_scaler:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
-
-            train_loss_sum += raw_loss.item() * batch_size
-            train_examples += batch_size
-
-            should_step = (
-                batch_index % gradient_accumulation_steps == 0
-                or batch_index == len(train_loader)
-            )
-            if not should_step:
-                continue
-
-            if use_grad_scaler:
-                scaler.unscale_(optimizer)
-            clip_grad_norm_(model.parameters(), float(training_config["max_grad_norm"]))
-
-            if use_grad_scaler:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-
-            scheduler.step()
+        for epoch in range(1, int(training_config["num_epochs"]) + 1):
+            model.train()
             optimizer.zero_grad(set_to_none=True)
-            global_step += 1
 
-            if global_step % int(training_config["log_every"]) == 0:
-                average_train_loss = train_loss_sum / max(train_examples, 1)
-                progress_bar.set_postfix(
-                    train_loss=f"{average_train_loss:.4f}",
-                    lr=f"{scheduler.get_last_lr()[0]:.2e}",
+            train_loss_sum = 0.0
+            train_examples = 0
+
+            progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}", leave=False)
+            for batch_index, batch in enumerate(progress_bar, start=1):
+                tensor_batch = move_tensor_batch_to_device(batch, device)
+                batch_size = tensor_batch["input_ids"].size(0)
+
+                with autocast_context(device, mixed_precision):
+                    outputs = model(**tensor_batch)
+                    raw_loss = outputs.loss
+                    loss = raw_loss / gradient_accumulation_steps
+
+                if use_grad_scaler:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
+
+                train_loss_sum += raw_loss.item() * batch_size
+                train_examples += batch_size
+
+                should_step = (
+                    batch_index % gradient_accumulation_steps == 0
+                    or batch_index == len(train_loader)
+                )
+                if not should_step:
+                    continue
+
+                if use_grad_scaler:
+                    scaler.unscale_(optimizer)
+                clip_grad_norm_(model.parameters(), float(training_config["max_grad_norm"]))
+
+                if use_grad_scaler:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
+
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+                global_step += 1
+
+                if global_step % int(training_config["log_every"]) == 0:
+                    average_train_loss = train_loss_sum / max(train_examples, 1)
+                    progress_bar.set_postfix(
+                        train_loss=f"{average_train_loss:.4f}",
+                        lr=f"{scheduler.get_last_lr()[0]:.2e}",
+                    )
+
+            average_train_loss = train_loss_sum / max(train_examples, 1)
+            validation_loss = evaluate_loss(model, validation_loader, device, mixed_precision)
+
+            epoch_metrics = {
+                "epoch": epoch,
+                "global_step": global_step,
+                "train_loss": average_train_loss,
+                "validation_loss": validation_loss,
+                "learning_rate": scheduler.get_last_lr()[0],
+            }
+            history.append(epoch_metrics)
+            write_sft_history(output_dir, history)
+            tracker.log_metrics(epoch_metrics, step=global_step, prefix="sft")
+
+            save_sft_checkpoint(
+                checkpoint_dir=output_dir / "checkpoints" / "last",
+                model=model,
+                training_tokenizer=training_tokenizer,
+                decoder_tokenizer=decoder_tokenizer,
+                config=config,
+                metrics=epoch_metrics,
+            )
+
+            if epoch % int(training_config["save_every_epochs"]) == 0:
+                save_sft_checkpoint(
+                    checkpoint_dir=output_dir / "checkpoints" / f"epoch-{epoch:02d}",
+                    model=model,
+                    training_tokenizer=training_tokenizer,
+                    decoder_tokenizer=decoder_tokenizer,
+                    config=config,
+                    metrics=epoch_metrics,
                 )
 
-        average_train_loss = train_loss_sum / max(train_examples, 1)
-        validation_loss = evaluate_loss(model, validation_loader, device, mixed_precision)
+            if validation_loss < best_validation_loss:
+                best_validation_loss = validation_loss
+                save_sft_checkpoint(
+                    checkpoint_dir=output_dir / "checkpoints" / "best",
+                    model=model,
+                    training_tokenizer=training_tokenizer,
+                    decoder_tokenizer=decoder_tokenizer,
+                    config=config,
+                    metrics=epoch_metrics,
+                )
 
-        epoch_metrics = {
-            "epoch": epoch,
-            "global_step": global_step,
-            "train_loss": average_train_loss,
-            "validation_loss": validation_loss,
-            "learning_rate": scheduler.get_last_lr()[0],
+        summary = {
+            "device": str(device),
+            "mixed_precision": mixed_precision,
+            "tokenizer_vocab_size": len(training_tokenizer),
+            "best_validation_loss": best_validation_loss,
+            "history": history,
+            "output_dir": str(output_dir),
         }
-        history.append(epoch_metrics)
-        write_sft_history(output_dir, history)
-
-        save_sft_checkpoint(
-            checkpoint_dir=output_dir / "checkpoints" / "last",
-            model=model,
-            training_tokenizer=training_tokenizer,
-            decoder_tokenizer=decoder_tokenizer,
-            config=config,
-            metrics=epoch_metrics,
-        )
-
-        if epoch % int(training_config["save_every_epochs"]) == 0:
-            save_sft_checkpoint(
-                checkpoint_dir=output_dir / "checkpoints" / f"epoch-{epoch:02d}",
-                model=model,
-                training_tokenizer=training_tokenizer,
-                decoder_tokenizer=decoder_tokenizer,
-                config=config,
-                metrics=epoch_metrics,
-            )
-
-        if validation_loss < best_validation_loss:
-            best_validation_loss = validation_loss
-            save_sft_checkpoint(
-                checkpoint_dir=output_dir / "checkpoints" / "best",
-                model=model,
-                training_tokenizer=training_tokenizer,
-                decoder_tokenizer=decoder_tokenizer,
-                config=config,
-                metrics=epoch_metrics,
-            )
-
-    summary = {
-        "device": str(device),
-        "mixed_precision": mixed_precision,
-        "tokenizer_vocab_size": len(training_tokenizer),
-        "best_validation_loss": best_validation_loss,
-        "history": history,
-        "output_dir": str(output_dir),
-    }
-    write_json(output_dir / "run_summary.json", summary)
-    return summary
+        write_json(output_dir / "run_summary.json", summary)
+        tracker.log_summary(_build_sft_tracking_summary(summary), prefix="sft")
+        tracker.finish(status="success")
+        return summary
+    except Exception:
+        tracker.finish(status="failed")
+        raise
 
 
 def train_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:

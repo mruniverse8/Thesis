@@ -7,7 +7,8 @@ Use this folder as the compact map for the rewritten `post_training` package.
 1. [Overall architecture](./ARCHITECTURE.md)
 2. [Staged multi-molecule SFT](./sft/README.md)
 3. [Molecule-stage PPO](./ppo/README.md)
-4. [Run scripts](../scripts/README.md)
+4. [Tracking helpers](../logging/README.md)
+5. [Run scripts](../scripts/README.md)
 
 ## Entry Points
 

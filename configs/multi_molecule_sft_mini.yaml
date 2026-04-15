@@ -16,20 +16,20 @@ model:
   molecule_separator_token: <mol_sep>
 
 data:
-  train_file: data/post_training/processed/train_multimol.jsonl
-  validation_file: data/post_training/processed/validation_multimol.jsonl
-  test_file: data/post_training/processed/test_multimol.jsonl
+  train_file: data/mini_post_training/grouped_splits/train_multimol.jsonl
+  validation_file: data/mini_post_training/grouped_splits/validation_multimol.jsonl
+  test_file: data/mini_post_training/grouped_splits/test_multimol.jsonl
   max_source_length: 512
   max_target_length: 768
   max_molecules_per_sequence: 8
-  num_workers: 2
+  num_workers: 0
 
 training:
-  output_dir: outputs/multi_molecule_sft
+  output_dir: outputs/multi_molecule_sft_mini
   device: auto
   mixed_precision: auto
   per_device_train_batch_size: 2
-  per_device_eval_batch_size: 4
+  per_device_eval_batch_size: 2
   gradient_accumulation_steps: 8
   num_epochs: 3
   learning_rate: 2.0e-5

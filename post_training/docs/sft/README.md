@@ -37,3 +37,5 @@ trainer.main
 - Wrapper script: [post_training/scripts/train_multi_molecule_sft.sh](../../scripts/train_multi_molecule_sft.sh)
 - Default config: [configs/multi_molecule_sft.yaml](../../../configs/multi_molecule_sft.yaml)
 - Tests: [post_training/scripts/test_post_training.sh](../../scripts/test_post_training.sh)
+
+The config accepts a top-level `tracking:` block for basic `wandb` or `comet` logging.

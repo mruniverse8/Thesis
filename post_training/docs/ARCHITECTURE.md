@@ -13,6 +13,7 @@ This is the shortest reading path for the rewritten `post_training` package.
 - Config helpers: [post_training/shared/config.py](../shared/config.py)
 - Canonical grouped dataset type: [post_training/shared/dataset_types.py](../shared/dataset_types.py)
 - Staged sequence helpers: [post_training/shared/sequence.py](../shared/sequence.py)
+- Experiment tracking: [post_training/logging/tracker.py](../logging/tracker.py)
 
 ## SFT Flow
 

@@ -9,11 +9,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from src.runtime_bootstrap import RuntimeEnvironment, summarize_environment
+
 
 KAGGLE_INPUT_ROOT = Path("/kaggle/input")
 KAGGLE_WORKING_ROOT = Path("/kaggle/working")
 ARTIFACT_EXPORT_ROOT = KAGGLE_WORKING_ROOT / "thesis_artifacts"
 REPO_VOCAB_RELATIVE_PATH = Path("molecules") / "dict" / "selfies_dict.txt"
+KAGGLE_REPO_DIR = KAGGLE_WORKING_ROOT / "Thesis"
 
 
 def _get_ipython():
@@ -317,3 +320,20 @@ def export_stage_artifacts(
     }
     (stage_root / "manifest.json").write_text(json_dumps(manifest), encoding="utf-8")
     return stage_root, manifest
+
+
+def get_bootstrap_environment(repo_dir: str | Path | None = None) -> RuntimeEnvironment:
+    resolved_repo_dir = Path(repo_dir).expanduser().resolve() if repo_dir is not None else KAGGLE_REPO_DIR
+    return RuntimeEnvironment(
+        name="kaggle",
+        workspace_root=KAGGLE_WORKING_ROOT,
+        default_repo_dir=resolved_repo_dir,
+    )
+
+
+def report_bootstrap_runtime(repo_dir: str | Path | None = None) -> dict[str, object]:
+    environment = get_bootstrap_environment(repo_dir)
+    report = summarize_environment(environment)
+    report["kaggle_input_root"] = str(KAGGLE_INPUT_ROOT)
+    report["kaggle_working_root"] = str(KAGGLE_WORKING_ROOT)
+    return report

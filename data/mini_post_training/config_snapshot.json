@@ -1,0 +1,41 @@
+{
+  "collection_output_dir": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini",
+  "derived_train_file": "/kaggle/working/Thesis/data/post_training/processed/train_multimol_mini_debug.jsonl",
+  "hf_login_status": "logged_in",
+  "max_descriptions": 128,
+  "num_beam_groups": 6,
+  "num_beams": 102,
+  "num_parts": 1,
+  "num_return_sequences": 100,
+  "part_index": 1,
+  "requested_raw_candidates": 12800,
+  "runtime": {
+    "cuda_available": true,
+    "datasets": "4.8.3",
+    "gpu_count": 2,
+    "gpu_name": "Tesla T4",
+    "python": "3.12.12",
+    "pyyaml": "6.0.3",
+    "rdkit": "2026.03.1",
+    "selfies": "2.1.1",
+    "torch": "2.10.0+cu128",
+    "transformers": "5.0.0",
+    "working_dir": "/kaggle/working",
+    "working_disk_free_gb": 19.5
+  },
+  "split_counts": {
+    "test": 4,
+    "train": 87,
+    "validation": 4
+  },
+  "split_output_dir": "/kaggle/working/Thesis/kaggle/generated_data/mini_post_training_splits",
+  "split_paths": {
+    "test": "/kaggle/working/Thesis/kaggle/generated_data/mini_post_training_splits/test_multimol.jsonl",
+    "train": "/kaggle/working/Thesis/kaggle/generated_data/mini_post_training_splits/train_multimol.jsonl",
+    "validation": "/kaggle/working/Thesis/kaggle/generated_data/mini_post_training_splits/validation_multimol.jsonl"
+  },
+  "target_molecules_per_description": 100,
+  "test_fraction": 0.05,
+  "train_file": "/kaggle/working/Thesis/data/chebi20/processed/train.jsonl",
+  "validation_fraction": 0.05
+}

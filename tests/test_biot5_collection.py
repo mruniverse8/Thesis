@@ -348,7 +348,9 @@ def _build_partition_train_records() -> list[dict[str, str]]:
     ]
 
 
-def _build_partition_config(tmp_path: Path, train_file: Path, *, part_index: int) -> dict[str, object]:
+def _build_partition_config(
+    tmp_path: Path, train_file: Path, *, part_index: int, num_parts: int = 5
+) -> dict[str, object]:
     return {
         "seed": 42,
         "model": {
@@ -378,7 +380,7 @@ def _build_partition_config(tmp_path: Path, train_file: Path, *, part_index: int
         "runtime": {
             "description_offset": 0,
             "max_descriptions": None,
-            "num_parts": 3,
+            "num_parts": num_parts,
             "part_index": part_index,
         },
     }
@@ -405,18 +407,18 @@ def test_collect_biot5_training_data_partitions_selected_descriptions(tmp_path) 
         generator=_build_partition_generator(),
     )
 
-    assert summary["selected_descriptions"] == 2
+    assert summary["selected_descriptions"] == 1
     assert summary["partition"] == {
-        "num_parts": 3,
+        "num_parts": 5,
         "part_index": 2,
-        "part_description_count": 2,
-        "part_start_index": 2,
-        "part_end_index_exclusive": 4,
+        "part_description_count": 1,
+        "part_start_index": 1,
+        "part_end_index_exclusive": 2,
         "total_selected_descriptions_before_partition": 5,
     }
 
     inputs = read_jsonl(tmp_path / "staging_part_2" / "inputs.jsonl")
-    assert [record["id"] for record in inputs] == ["desc-3", "desc-4"]
+    assert [record["id"] for record in inputs] == ["desc-2"]
 
 
 def test_merge_biot5_collection_parts_merges_partition_outputs(tmp_path) -> None:
@@ -426,7 +428,7 @@ def test_merge_biot5_collection_parts_merges_partition_outputs(tmp_path) -> None
     part_summaries = []
     part_staging_dirs = []
     part_derived_files = []
-    for part_index in (1, 2, 3):
+    for part_index in (1, 2, 3, 4, 5):
         config = _build_partition_config(tmp_path, train_file, part_index=part_index)
         summary = collect_biot5_training_data(config, generator=_build_partition_generator())
         part_summaries.append(summary)
@@ -440,13 +442,13 @@ def test_merge_biot5_collection_parts_merges_partition_outputs(tmp_path) -> None
         merged_derived_train_file=tmp_path / "merged" / "post_training" / "train_multimol.jsonl",
     )
 
-    assert [item["partition"]["part_index"] for item in part_summaries] == [1, 2, 3]
+    assert [item["partition"]["part_index"] for item in part_summaries] == [1, 2, 3, 4, 5]
     assert merged_summary["selected_descriptions"] == 5
     assert merged_summary["descriptions_with_accepted_molecules"] == 5
     assert merged_summary["derived_examples"] == 5
     assert merged_summary["partition"] == {
-        "num_parts": 3,
-        "merged_part_indices": [1, 2, 3],
+        "num_parts": 5,
+        "merged_part_indices": [1, 2, 3, 4, 5],
         "total_selected_descriptions_before_partition": 5,
     }
 
@@ -475,7 +477,7 @@ def test_merge_biot5_collection_parts_rejects_incomplete_partition_set(tmp_path)
 
     part_staging_dirs = []
     part_derived_files = []
-    for part_index in (1, 3):
+    for part_index in (1, 2, 4, 5):
         config = _build_partition_config(tmp_path, train_file, part_index=part_index)
         collect_biot5_training_data(config, generator=_build_partition_generator())
         part_staging_dirs.append(config["data"]["staging_dir"])

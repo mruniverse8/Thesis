@@ -13,6 +13,7 @@
 ## Package Layout
 
 - [post_training/shared](./shared)
+- [post_training/logging](./logging)
 - [post_training/sft_multi](./sft_multi)
 - [post_training/ppo](./ppo)
 
@@ -35,3 +36,7 @@ bash post_training/scripts/test_post_training.sh
 ```
 
 The wrapper scripts default to `CONDA_ENV=thesis_biot5_sft`.
+
+## Tracking
+
+Minimal remote tracking is available for both SFT and PPO through the top-level `tracking:` config block. Supported backends are `wandb` and `comet`, and local JSON outputs remain unchanged.

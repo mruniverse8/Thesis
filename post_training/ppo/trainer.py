@@ -13,6 +13,7 @@ from reward_utils.defaults import RewardConfig
 from src.io_utils import PROJECT_ROOT, ensure_dir, load_yaml, resolve_path, set_seed, write_json
 from src.training import choose_device
 
+from post_training.logging import BaseTracker, NullTracker, build_tracker
 from post_training.shared.config import resolve_ppo_config_paths
 from post_training.sft_multi.dataset import MultiMoleculeDataset
 
@@ -264,6 +265,32 @@ def sample_examples(dataset: MultiMoleculeDataset, count: int) -> list[dict[str,
     return [dataset[random.randrange(len(dataset))] for _ in range(count)]
 
 
+def _build_ppo_tracking_config_payload(
+    config: dict[str, object],
+    *,
+    output_dir: str,
+) -> dict[str, object]:
+    return {
+        "stage_name": "molecule_wise_ppo",
+        "output_dir": output_dir,
+        "seed": config.get("seed"),
+        "resolved_config": config,
+    }
+
+
+def _build_ppo_tracking_summary(summary: dict[str, object]) -> dict[str, object]:
+    history = summary.get("history", [])
+    last_metrics = history[-1] if history else {}
+    tracking_summary: dict[str, object] = {
+        "output_dir": summary["output_dir"],
+        "num_iterations": summary["num_iterations"],
+    }
+    for key in ("mean_reward", "mean_kl", "mean_entropy", "mean_policy_loss", "mean_value_loss"):
+        if key in last_metrics:
+            tracking_summary[f"last_{key}"] = last_metrics[key]
+    return tracking_summary
+
+
 def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
     checkpoint_path = resolve_path(config["model"]["checkpoint"], PROJECT_ROOT)
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, use_fast=True)
@@ -307,20 +334,37 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
     )
     ensure_dir(output_dir)
 
+    tracker: BaseTracker = NullTracker()
     history: list[dict[str, float]] = []
-    for iteration in range(1, ppo_config.ppo_iterations + 1):
-        iteration_examples = sample_examples(train_dataset, ppo_config.batch_size)
-        metrics = trainer.train_iteration(iteration_examples, iteration_index=iteration)
-        history.append(metrics)
-        write_ppo_history(output_dir, history)
+    try:
+        tracker = build_tracker(
+            config,
+            stage_name="molecule_wise_ppo",
+            output_dir=output_dir,
+        )
+        tracker.log_config(
+            _build_ppo_tracking_config_payload(config, output_dir=str(output_dir))
+        )
 
-    summary = {
-        "output_dir": str(output_dir),
-        "num_iterations": ppo_config.ppo_iterations,
-        "history": history,
-    }
-    write_json(output_dir / "run_summary.json", summary)
-    return summary
+        for iteration in range(1, ppo_config.ppo_iterations + 1):
+            iteration_examples = sample_examples(train_dataset, ppo_config.batch_size)
+            metrics = trainer.train_iteration(iteration_examples, iteration_index=iteration)
+            history.append(metrics)
+            write_ppo_history(output_dir, history)
+            tracker.log_metrics(metrics, step=iteration, prefix="ppo")
+
+        summary = {
+            "output_dir": str(output_dir),
+            "num_iterations": ppo_config.ppo_iterations,
+            "history": history,
+        }
+        write_json(output_dir / "run_summary.json", summary)
+        tracker.log_summary(_build_ppo_tracking_summary(summary), prefix="ppo")
+        tracker.finish(status="success")
+        return summary
+    except Exception:
+        tracker.finish(status="failed")
+        raise
 
 
 def parse_args() -> argparse.Namespace:

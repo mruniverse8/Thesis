@@ -9,7 +9,7 @@ tracking:
   tags: []
 
 model:
-  checkpoint: outputs/multi_molecule_sft/checkpoints/best
+  checkpoint: outputs/multi_molecule_sft_mini/checkpoints/best
   use_lora: true
   lora_rank: 16
   lora_alpha: 32
@@ -17,13 +17,13 @@ model:
   target_modules: ["q", "v"]
 
 data:
-  train_file: data/post_training/processed/train_multimol.jsonl
-  validation_file: data/post_training/processed/validation_multimol.jsonl
-  test_file: data/post_training/processed/test_multimol.jsonl
+  train_file: data/mini_post_training/grouped_splits/train_multimol.jsonl
+  validation_file: data/mini_post_training/grouped_splits/validation_multimol.jsonl
+  test_file: data/mini_post_training/grouped_splits/test_multimol.jsonl
   max_source_length: 512
 
 training:
-  output_dir: outputs/molecule_wise_ppo
+  output_dir: outputs/molecule_wise_ppo_mini
   device: auto
   save_every_iterations: 10
 
@@ -40,8 +40,8 @@ reward:
 
 ppo:
   ppo_iterations: 200
-  batch_size: 128
-  mini_batch_size: 8
+  batch_size: 2
+  mini_batch_size: 2
   ppo_epochs_per_batch: 4
   learning_rate: 5.0e-5
   kl_penalty: 0.01

@@ -33,6 +33,7 @@ From the thesis repo root:
 pip install -r requirements.txt
 python scripts/download_chebi20.py --output-dir data/chebi20
 python scripts/download_lpm24.py --output-dir data/lpm24
+python scripts/download_train_dataset.py --skip-existing
 ```
 
 To run the BioT5+ ChEBI collection step after downloading ChEBI:
@@ -77,9 +78,17 @@ For `LPM-24`, the preprocessing step writes:
 - `data/lpm24/processed/test_multimol.jsonl`
 - `data/lpm24/processed/test_eval_first_1000_multimol.jsonl`
 
+For the mini post-training debug bundle used by the Colab/Kaggle init scripts, the downloader writes:
+
+- `data/mini_post_training/post_training_processed/train_multimol.jsonl`
+- `data/mini_post_training/grouped_splits/train_multimol.jsonl`
+- `data/mini_post_training/grouped_splits/validation_multimol.jsonl`
+- `data/mini_post_training/grouped_splits/test_multimol.jsonl`
+
 ## Notes
 
 - Processed dataset files are ignored by `.gitignore`; regenerate them locally.
 - The training config expects the processed files under `data/chebi20/processed/`.
 - The grouped ChEBI collection output used by post-training is `data/post_training/processed/train_multimol.jsonl`.
+- The notebook bootstrap scripts default to the mini configs for multi-molecule SFT and PPO, so they expect `data/mini_post_training/`.
 - For code-level details on the collection flow, see `../data_collection/README.md`.

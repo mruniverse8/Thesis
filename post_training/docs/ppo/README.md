@@ -53,3 +53,5 @@ trainer.main
 - Tests: [post_training/scripts/test_post_training.sh](../../scripts/test_post_training.sh)
 
 `peft` is required when `use_lora: true`.
+
+The config accepts a top-level `tracking:` block for basic `wandb` or `comet` logging.

@@ -1,0 +1,38 @@
+{
+  "train_file": "/kaggle/working/Thesis/data/chebi20/processed/train.jsonl",
+  "staging_dir": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini",
+  "derived_train_file": "/kaggle/working/Thesis/data/post_training/processed/train_multimol_mini_debug.jsonl",
+  "seed": 42,
+  "generation_strategy": "diverse_beam_search",
+  "selected_descriptions": 128,
+  "descriptions_with_accepted_molecules": 95,
+  "raw_candidates": 12800,
+  "accepted_candidates": 598,
+  "derived_examples": 95,
+  "target_molecules_per_description": 100,
+  "max_molecules_per_example": 8,
+  "rejections_by_reason": {
+    "duplicate_smiles": 409,
+    "empty_output": 44,
+    "invalid_molecule": 948,
+    "invalid_selfies": 9084,
+    "unaccepted_molecule": 1717
+  },
+  "partition": {
+    "num_parts": 1,
+    "part_index": 1,
+    "part_description_count": 128,
+    "part_start_index": 0,
+    "part_end_index_exclusive": 128,
+    "total_selected_descriptions_before_partition": 128
+  },
+  "files": {
+    "inputs": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/inputs.jsonl",
+    "raw_candidates": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/raw_candidates.jsonl",
+    "candidate_assessments": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/candidate_assessments.jsonl",
+    "accepted_grouped": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/accepted_grouped.jsonl",
+    "derived_train_file": "/kaggle/working/Thesis/data/post_training/processed/train_multimol_mini_debug.jsonl",
+    "resolved_config": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/resolved_config.yaml",
+    "summary": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/summary.json"
+  }
+}

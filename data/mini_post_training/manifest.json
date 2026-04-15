@@ -1,0 +1,61 @@
+{
+  "artifacts": {
+    "collection_summary.json": "/kaggle/working/thesis_artifacts/mini_post_training/collection_summary.json",
+    "config_snapshot.json": "/kaggle/working/thesis_artifacts/mini_post_training/config_snapshot.json",
+    "grouped_splits": "/kaggle/working/thesis_artifacts/mini_post_training/grouped_splits",
+    "post_training_processed/train_multimol.jsonl": "/kaggle/working/thesis_artifacts/mini_post_training/post_training_processed/train_multimol.jsonl"
+  },
+  "created_at_utc": "2026-04-13T11:02:27.458805+00:00",
+  "export_root": "/kaggle/working/thesis_artifacts/mini_post_training",
+  "metadata": {
+    "config_path": "/kaggle/working/Thesis/kaggle/generated_configs/collect_biot5_chebi20.mini_debug.kaggle.yaml",
+    "required_outputs": {
+      "collection_output_dir": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini",
+      "collection_summary": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/summary.json",
+      "config_snapshot": "/kaggle/working/Thesis/outputs/kaggle/mini_post_training/config_snapshot.json",
+      "derived_train_file": "/kaggle/working/Thesis/data/post_training/processed/train_multimol_mini_debug.jsonl",
+      "split_test": "/kaggle/working/Thesis/kaggle/generated_data/mini_post_training_splits/test_multimol.jsonl",
+      "split_train": "/kaggle/working/Thesis/kaggle/generated_data/mini_post_training_splits/train_multimol.jsonl",
+      "split_validation": "/kaggle/working/Thesis/kaggle/generated_data/mini_post_training_splits/validation_multimol.jsonl"
+    },
+    "summary": {
+      "accepted_candidates": 598,
+      "derived_examples": 95,
+      "derived_train_file": "/kaggle/working/Thesis/data/post_training/processed/train_multimol_mini_debug.jsonl",
+      "descriptions_with_accepted_molecules": 95,
+      "files": {
+        "accepted_grouped": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/accepted_grouped.jsonl",
+        "candidate_assessments": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/candidate_assessments.jsonl",
+        "derived_train_file": "/kaggle/working/Thesis/data/post_training/processed/train_multimol_mini_debug.jsonl",
+        "inputs": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/inputs.jsonl",
+        "raw_candidates": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/raw_candidates.jsonl",
+        "resolved_config": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/resolved_config.yaml",
+        "summary": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini/summary.json"
+      },
+      "generation_strategy": "diverse_beam_search",
+      "max_molecules_per_example": 8,
+      "partition": {
+        "num_parts": 1,
+        "part_description_count": 128,
+        "part_end_index_exclusive": 128,
+        "part_index": 1,
+        "part_start_index": 0,
+        "total_selected_descriptions_before_partition": 128
+      },
+      "raw_candidates": 12800,
+      "rejections_by_reason": {
+        "duplicate_smiles": 409,
+        "empty_output": 44,
+        "invalid_molecule": 948,
+        "invalid_selfies": 9084,
+        "unaccepted_molecule": 1717
+      },
+      "seed": 42,
+      "selected_descriptions": 128,
+      "staging_dir": "/kaggle/working/Thesis/data_collection/outputs/kaggle_chebi20_biot5_train_mini",
+      "target_molecules_per_description": 100,
+      "train_file": "/kaggle/working/Thesis/data/chebi20/processed/train.jsonl"
+    }
+  },
+  "stage_name": "mini_post_training"
+}

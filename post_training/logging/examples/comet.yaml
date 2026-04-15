@@ -1,0 +1,8 @@
+tracking:
+  enabled: true
+  backend: comet
+  project: biot5-post-training
+  workspace: your-comet-workspace
+  run_name:
+  tags:
+    - ppo

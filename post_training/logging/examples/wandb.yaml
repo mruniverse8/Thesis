@@ -1,0 +1,8 @@
+tracking:
+  enabled: true
+  backend: wandb
+  project: Thesis-1
+  workspace: koala-team
+  run_name:
+  tags:
+    - sft
