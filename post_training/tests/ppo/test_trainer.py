@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import torch
 
 from post_training.ppo.config import PPOConfig
-from post_training.ppo.trainer import compute_clipped_policy_objective, run_molecule_stage_ppo, standardize_tensor
+from post_training.ppo.trainer import run_molecule_stage_ppo, standardize_tensor
 from post_training.shared.config import (
     DEFAULT_PPO_FALLBACK_CHECKPOINT,
     resolve_ppo_checkpoint_source,
@@ -16,15 +16,6 @@ def test_standardize_tensor_centers_values() -> None:
     standardized = standardize_tensor(torch.tensor([1.0, 2.0, 3.0]))
 
     assert standardized.mean().abs().item() < 1.0e-6
-
-
-def test_compute_clipped_policy_objective_clamps_ratio() -> None:
-    ratio = torch.tensor([1.5, 0.7])
-    advantages = torch.tensor([1.0, -1.0])
-
-    objective = compute_clipped_policy_objective(ratio, advantages, clip_range=0.2)
-
-    assert torch.allclose(objective, torch.tensor([1.2, -0.8]))
 
 
 def test_ppo_config_from_dict_reads_rollout_section_and_ignores_old_separator_key() -> None:

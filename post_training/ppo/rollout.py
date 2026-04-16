@@ -89,27 +89,46 @@ def compute_action_stats(
     decoder_input_ids: torch.Tensor,
     action_token_ids: Sequence[int],
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    running_decoder_input_ids = decoder_input_ids
-    total_logprob = torch.zeros((), device=input_ids.device)
-    total_entropy = torch.zeros((), device=input_ids.device)
+    if not action_token_ids:
+        zero = torch.zeros((), device=input_ids.device)
+        return zero, zero
 
-    for token_id in action_token_ids:
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            decoder_input_ids=running_decoder_input_ids,
-            return_dict=True,
+    # Shape actions as a single decoder continuation: [a_1, a_2, ..., a_T].
+    action_tokens = torch.tensor(
+        [[int(token_id) for token_id in action_token_ids]],
+        dtype=torch.long,
+        device=input_ids.device,
+    )
+
+    # Teacher forcing lets us score the whole sampled action in one forward pass.
+    # To predict token a_t, the decoder should see the original prefix plus
+    # all previously chosen action tokens [a_1, ..., a_{t-1}].
+    teacher_forced_decoder_input_ids = decoder_input_ids
+    if action_tokens.size(1) > 1:
+        teacher_forced_decoder_input_ids = torch.cat(
+            [decoder_input_ids, action_tokens[:, :-1]],
+            dim=1,
         )
-        next_logits = outputs.logits[:, -1, :]
-        log_probs = torch.log_softmax(next_logits, dim=-1)
-        probabilities = torch.softmax(next_logits, dim=-1)
-        total_logprob = total_logprob + log_probs[0, int(token_id)]
-        total_entropy = total_entropy - (probabilities * log_probs).sum(dim=-1).squeeze(0)
 
-        next_token_tensor = torch.tensor([[int(token_id)]], device=input_ids.device)
-        running_decoder_input_ids = torch.cat([running_decoder_input_ids, next_token_tensor], dim=1)
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        decoder_input_ids=teacher_forced_decoder_input_ids,
+        return_dict=True,
+    )
 
-    return total_logprob, total_entropy
+    # The logits returned for the decoder positions align with:
+    #   prefix_last_position -> predicts a_1
+    #   a_1 position         -> predicts a_2
+    #   ...
+    # so we slice from the last prefix position onward to get exactly T action logits.
+    action_start_index = decoder_input_ids.size(1) - 1
+    action_logits = outputs.logits[:, action_start_index:, :]
+    log_probs = torch.log_softmax(action_logits, dim=-1)
+    probabilities = torch.softmax(action_logits, dim=-1)
+    selected_log_probs = log_probs.gather(-1, action_tokens.unsqueeze(-1)).squeeze(-1)
+    token_entropies = -(probabilities * log_probs).sum(dim=-1)
+    return selected_log_probs.sum(), token_entropies.sum()
 
 
 def sample_stage(
