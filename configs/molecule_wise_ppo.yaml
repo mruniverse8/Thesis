@@ -3,7 +3,7 @@ seed: 42
 tracking:
   enabled: true
   backend: wandb
-  project: Thesis-1
+  project: Thesis-2
   workspace: koala-team
   run_name:
   tags: []

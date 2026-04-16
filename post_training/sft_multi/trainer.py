@@ -20,6 +20,7 @@ from src.training import (
     evaluate_loss,
     resolve_mixed_precision,
 )
+from src.tokenizer_utils import assert_tokenizer_matches_model_vocab
 
 from post_training.logging import BaseTracker, NullTracker, build_tracker
 from post_training.shared.config import resolve_multi_molecule_sft_config_paths
@@ -87,11 +88,14 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
     device = choose_device(training_config.get("device", "auto"))
     mixed_precision = resolve_mixed_precision(training_config.get("mixed_precision", "auto"), device)
 
-    training_tokenizer, decoder_tokenizer, tokenizer_metadata = prepare_sft_tokenizers(model_config)
+    training_tokenizer, tokenizer_metadata = prepare_sft_tokenizers(model_config)
 
     model = T5ForConditionalGeneration.from_pretrained(model_config["name"])
-    if model.get_input_embeddings().weight.size(0) != len(training_tokenizer):
-        model.resize_token_embeddings(len(training_tokenizer))
+    assert_tokenizer_matches_model_vocab(
+        training_tokenizer,
+        model,
+        context="Multi-molecule SFT",
+    )
     model.to(device)
 
     train_loader = build_multi_molecule_dataloader(
@@ -224,7 +228,6 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
                 checkpoint_dir=output_dir / "checkpoints" / "last",
                 model=model,
                 training_tokenizer=training_tokenizer,
-                decoder_tokenizer=decoder_tokenizer,
                 config=config,
                 metrics=epoch_metrics,
             )
@@ -234,7 +237,6 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
                     checkpoint_dir=output_dir / "checkpoints" / f"epoch-{epoch:02d}",
                     model=model,
                     training_tokenizer=training_tokenizer,
-                    decoder_tokenizer=decoder_tokenizer,
                     config=config,
                     metrics=epoch_metrics,
                 )
@@ -245,7 +247,6 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
                     checkpoint_dir=output_dir / "checkpoints" / "best",
                     model=model,
                     training_tokenizer=training_tokenizer,
-                    decoder_tokenizer=decoder_tokenizer,
                     config=config,
                     metrics=epoch_metrics,
                 )

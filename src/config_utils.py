@@ -32,7 +32,6 @@ def resolve_runtime_config_paths(
     return resolve_config_path_fields(
         config,
         fields_by_section={
-            "model": ("selfies_vocab_path",),
             "data": ("train_file", "validation_file", "test_file"),
             "training": ("output_dir",),
         },

@@ -36,7 +36,7 @@ The active repo surface is focused on dataset preparation, training, post-traini
 - `kaggle/`: Kaggle-specific support helpers and run notes
 - `post_training/`: architecture specs for multi-molecule SFT and molecule-wise PPO
 - `scripts/train_multi_molecule_sft.py`: run description-to-multi-SELFIES SFT
-- `scripts/train_molecule_wise_ppo.py`: run molecule-wise PPO from a multi-molecule SFT checkpoint
+- `scripts/train_molecule_wise_ppo.py`: run molecule-wise PPO, preferring the multi-molecule SFT checkpoint and otherwise falling back to the original BioT5 ChEBI-20 weights
 - `molecules/`: canonical molecule and chemistry package
 - `reward_utils/`: compatibility surface for older reward imports
 - `src/`: prompt formatting, dataset handling, tokenizer setup, and training helpers
@@ -87,7 +87,7 @@ Train the post-training multi-molecule SFT stage:
 python scripts/train_multi_molecule_sft.py --config configs/multi_molecule_sft.yaml
 ```
 
-Train molecule-wise PPO from the multi-molecule SFT checkpoint:
+Train molecule-wise PPO from the preferred multi-molecule SFT checkpoint, with fallback to the original BioT5 ChEBI-20 weights when it is absent:
 
 ```bash
 python scripts/train_molecule_wise_ppo.py --config configs/molecule_wise_ppo.yaml
@@ -99,7 +99,7 @@ For notebook runtimes, `scripts/init_colab.py` and `scripts/init_kaggle.py` are 
 
 - Data collection uses the BioT5+ ChEBI-20 checkpoint, its checkpoint-native tokenizer, diverse beam search, SELFIES-first wrapper-token cleanup, RDKit validation, similarity acceptance, canonical-SMILES deduplication, and optional contiguous run partitioning for long collection jobs.
 - The ChEBI collection step derives grouped multi-molecule training data at `data/post_training/processed/train_multimol.jsonl`.
-- Training uses a custom PyTorch loop around `T5ForConditionalGeneration`.
+- Training uses a custom PyTorch loop around `T5ForConditionalGeneration` with the original tokenizer already packaged with each model or checkpoint.
 - Prompts follow the BioT5+ text-to-molecule format.
 - Targets are written as `<bom>{SELFIES}<eom>`.
 - Molecule parsing, SELFIES utilities, fingerprints, similarity, and reward scoring now live under `molecules/`.

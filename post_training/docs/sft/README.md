@@ -32,6 +32,8 @@ trainer.main
   -> supervised training loop
 ```
 
+`prepare_sft_tokenizers` now loads the original tokenizer from the configured model checkpoint and requires the checkpoint vocabulary to already contain the staged SELFIES wrapper tokens.
+
 ## Run It
 
 - Wrapper script: [post_training/scripts/train_multi_molecule_sft.sh](../../scripts/train_multi_molecule_sft.sh)

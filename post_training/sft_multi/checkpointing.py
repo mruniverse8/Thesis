@@ -29,7 +29,6 @@ def save_sft_checkpoint(
     checkpoint_dir: str | Path,
     model,
     training_tokenizer,
-    decoder_tokenizer,
     config: dict[str, Any],
     metrics: dict[str, Any],
 ) -> None:
@@ -37,7 +36,6 @@ def save_sft_checkpoint(
         checkpoint_dir=checkpoint_dir,
         model=model,
         training_tokenizer=training_tokenizer,
-        decoder_tokenizer=decoder_tokenizer,
         config=config,
         metrics=metrics,
     )

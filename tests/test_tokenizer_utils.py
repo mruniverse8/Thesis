@@ -1,22 +1,71 @@
-from src.tokenizer_utils import get_existing_additional_special_tokens
+from __future__ import annotations
+
+import torch
+import pytest
+
+import src.tokenizer_utils as tokenizer_utils
 
 
-class DummyTokenizerNoAttr:
-    special_tokens_map = {"additional_special_tokens": ["<bom>", "<eom>"]}
-    special_tokens_map_extended = {}
+class DummyTokenizer:
+    def __init__(self, vocab: dict[str, int]) -> None:
+        self._vocab = dict(vocab)
+        self.model_max_length: int | None = None
+
+    def get_vocab(self) -> dict[str, int]:
+        return dict(self._vocab)
+
+    def __len__(self) -> int:
+        return len(self._vocab)
 
 
-class DummyTokenizerWithDuplicates:
-    additional_special_tokens = ["<bom>", "<eom>"]
-    special_tokens_map = {"additional_special_tokens": ["<bom>"]}
-    special_tokens_map_extended = {"additional_special_tokens": ["<eom>", "<extra>"]}
+class DummyModel:
+    def __init__(self, vocab_size: int) -> None:
+        self._embedding = type("Embedding", (), {"weight": torch.zeros((vocab_size, 1))})()
+
+    def get_input_embeddings(self):
+        return self._embedding
 
 
-def test_get_existing_additional_special_tokens_without_attribute():
-    tokenizer = DummyTokenizerNoAttr()
-    assert get_existing_additional_special_tokens(tokenizer) == ["<bom>", "<eom>"]
+def test_prepare_training_tokenizer_uses_original_checkpoint_tokenizer(monkeypatch) -> None:
+    tokenizer = DummyTokenizer({"<bom>": 0, "<eom>": 1, "[C]": 2})
+
+    def fake_from_pretrained(model_name_or_path: str, use_fast: bool = True):
+        assert model_name_or_path == "demo-model"
+        assert use_fast is True
+        return tokenizer
+
+    monkeypatch.setattr(tokenizer_utils.AutoTokenizer, "from_pretrained", fake_from_pretrained)
+
+    loaded_tokenizer, metadata = tokenizer_utils.prepare_training_tokenizer("demo-model")
+
+    assert loaded_tokenizer is tokenizer
+    assert tokenizer.model_max_length == int(1e9)
+    assert metadata == {
+        "vocab_size": 3,
+        "added_selfies_tokens": 0,
+        "added_special_tokens": 0,
+    }
 
 
-def test_get_existing_additional_special_tokens_deduplicates_sources():
-    tokenizer = DummyTokenizerWithDuplicates()
-    assert get_existing_additional_special_tokens(tokenizer) == ["<bom>", "<eom>", "<extra>"]
+def test_prepare_training_tokenizer_requires_staged_selfies_tokens(monkeypatch) -> None:
+    tokenizer = DummyTokenizer({"<bom>": 0, "[C]": 1})
+    monkeypatch.setattr(
+        tokenizer_utils.AutoTokenizer,
+        "from_pretrained",
+        lambda *args, **kwargs: tokenizer,
+    )
+
+    with pytest.raises(ValueError, match="<eom>"):
+        tokenizer_utils.prepare_training_tokenizer("demo-model")
+
+
+def test_assert_tokenizer_matches_model_vocab_rejects_mismatch() -> None:
+    tokenizer = DummyTokenizer({"<bom>": 0, "<eom>": 1, "[C]": 2})
+    model = DummyModel(vocab_size=5)
+
+    with pytest.raises(ValueError, match="vocab mismatch"):
+        tokenizer_utils.assert_tokenizer_matches_model_vocab(
+            tokenizer,
+            model,
+            context="unit-test",
+        )

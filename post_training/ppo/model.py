@@ -8,6 +8,7 @@ from torch import nn
 from transformers import T5ForConditionalGeneration
 
 from src.io_utils import ensure_dir, write_json
+from src.tokenizer_utils import assert_tokenizer_matches_model_vocab
 
 
 def freeze_module(module: nn.Module) -> None:
@@ -17,12 +18,8 @@ def freeze_module(module: nn.Module) -> None:
 
 def load_reference_model(
     checkpoint_path: str | Path,
-    *,
-    tokenizer_size: int | None = None,
 ) -> T5ForConditionalGeneration:
     model = T5ForConditionalGeneration.from_pretrained(checkpoint_path)
-    if tokenizer_size is not None and model.get_input_embeddings().weight.size(0) != tokenizer_size:
-        model.resize_token_embeddings(tokenizer_size)
     freeze_module(model)
     model.eval()
     return model
@@ -93,7 +90,6 @@ class PolicyValueModel(nn.Module):
         cls,
         checkpoint_path: str | Path,
         *,
-        tokenizer_size: int | None = None,
         use_lora: bool = True,
         lora_rank: int = 16,
         lora_alpha: int = 32,
@@ -102,8 +98,6 @@ class PolicyValueModel(nn.Module):
         freeze_base_model_without_lora: bool = False,
     ) -> "PolicyValueModel":
         model = T5ForConditionalGeneration.from_pretrained(checkpoint_path)
-        if tokenizer_size is not None and model.get_input_embeddings().weight.size(0) != tokenizer_size:
-            model.resize_token_embeddings(tokenizer_size)
 
         if use_lora:
             model = _apply_lora_adapters(
@@ -164,3 +158,12 @@ class PolicyValueModel(nn.Module):
             write_json(checkpoint_dir / "config.json", config)
         if metrics is not None:
             write_json(checkpoint_dir / "metrics.json", metrics)
+
+
+def assert_checkpoint_tokenizer_matches_model(
+    tokenizer: Any,
+    model: T5ForConditionalGeneration,
+    *,
+    context: str,
+) -> None:
+    assert_tokenizer_matches_model_vocab(tokenizer, model, context=context)

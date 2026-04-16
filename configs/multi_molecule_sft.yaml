@@ -10,9 +10,6 @@ tracking:
 
 model:
   name: QizhiPei/biot5-plus-base
-  tokenizer_name: QizhiPei/biot5-plus-base
-  base_tokenizer_name: google/t5-v1_1-base
-  selfies_vocab_path: molecules/dict/selfies_dict.txt
   molecule_separator_token: <mol_sep>
 
 data:

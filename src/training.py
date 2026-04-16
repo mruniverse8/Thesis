@@ -15,7 +15,7 @@ from post_training.logging import BaseTracker, NullTracker, build_tracker
 
 from .datasets import TextToSelfiesCollator, TextToSelfiesDataset, move_tensor_batch_to_device
 from .io_utils import dump_yaml, ensure_dir, write_json
-from .tokenizer_utils import build_decoder_tokenizer, prepare_training_tokenizer
+from .tokenizer_utils import assert_tokenizer_matches_model_vocab, prepare_training_tokenizer
 
 
 def choose_device(device_name: str) -> torch.device:
@@ -98,14 +98,12 @@ def save_checkpoint(
     checkpoint_dir: Path,
     model: T5ForConditionalGeneration,
     training_tokenizer: Any,
-    decoder_tokenizer: Any,
     config: dict[str, Any],
     metrics: dict[str, Any],
 ) -> None:
     ensure_dir(checkpoint_dir)
     model.save_pretrained(checkpoint_dir)
     training_tokenizer.save_pretrained(checkpoint_dir)
-    decoder_tokenizer.save_pretrained(checkpoint_dir / "decoder_tokenizer")
     dump_yaml(checkpoint_dir / "config.yaml", config)
     write_json(checkpoint_dir / "metrics.json", metrics)
 
@@ -142,18 +140,15 @@ def train_model(config: dict[str, Any]) -> dict[str, Any]:
     mixed_precision = resolve_mixed_precision(training_config.get("mixed_precision", "auto"), device)
 
     training_tokenizer, tokenizer_metadata = prepare_training_tokenizer(
-        tokenizer_name=model_config["tokenizer_name"],
-        selfies_vocab_path=model_config["selfies_vocab_path"],
-    )
-    decoder_tokenizer = build_decoder_tokenizer(
-        base_tokenizer_name=model_config["base_tokenizer_name"],
-        training_tokenizer=training_tokenizer,
+        model_name_or_path=model_config["name"],
     )
 
     model = T5ForConditionalGeneration.from_pretrained(model_config["name"])
-    embedding_size = model.get_input_embeddings().weight.size(0)
-    if embedding_size != len(training_tokenizer):
-        model.resize_token_embeddings(len(training_tokenizer))
+    assert_tokenizer_matches_model_vocab(
+        training_tokenizer,
+        model,
+        context="Base SFT",
+    )
     model.to(device)
 
     train_loader = build_dataloader(
@@ -284,7 +279,6 @@ def train_model(config: dict[str, Any]) -> dict[str, Any]:
                 checkpoint_dir=output_dir / "checkpoints" / "last",
                 model=model,
                 training_tokenizer=training_tokenizer,
-                decoder_tokenizer=decoder_tokenizer,
                 config=config,
                 metrics=epoch_metrics,
             )
@@ -294,7 +288,6 @@ def train_model(config: dict[str, Any]) -> dict[str, Any]:
                     checkpoint_dir=output_dir / "checkpoints" / f"epoch-{epoch:02d}",
                     model=model,
                     training_tokenizer=training_tokenizer,
-                    decoder_tokenizer=decoder_tokenizer,
                     config=config,
                     metrics=epoch_metrics,
                 )
@@ -305,7 +298,6 @@ def train_model(config: dict[str, Any]) -> dict[str, Any]:
                     checkpoint_dir=output_dir / "checkpoints" / "best",
                     model=model,
                     training_tokenizer=training_tokenizer,
-                    decoder_tokenizer=decoder_tokenizer,
                     config=config,
                     metrics=epoch_metrics,
                 )
