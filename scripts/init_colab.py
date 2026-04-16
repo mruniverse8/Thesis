@@ -11,6 +11,7 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from colab.thesis_colab_support import DEFAULT_REPO_DIR as DEFAULT_COLAB_REPO_DIR
 from colab.thesis_colab_support import get_bootstrap_environment
+from src.checkpoint_bootstrap import build_ppo_checkpoint_prep_command
 from src.runtime_bootstrap import (
     DEFAULT_REPO_BRANCH,
     DEFAULT_REPO_URL,
@@ -58,6 +59,13 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TRAIN_DATASET_FILE_ID,
         help="Google Drive file id used by the mini post-training dataset downloader.",
     )
+    parser.add_argument(
+        "--ppo-checkpoint-download-source",
+        "--ppo-checkpoint-source",
+        dest="ppo_checkpoint_download_source",
+        default=None,
+        help="Optional Google Drive file id or share URL for a zipped PPO checkpoint bundle.",
+    )
     return parser.parse_args()
 
 
@@ -92,6 +100,32 @@ def main() -> None:
     )
     if dataset_command is not None:
         run_command(dataset_command, cwd=repo_dir)
+
+    checkpoint_kind, checkpoint_command, checkpoint_target = ("not_applicable", None, None)
+    if stage_spec.stage == "ppo":
+        checkpoint_kind, checkpoint_command, checkpoint_target = build_ppo_checkpoint_prep_command(
+            repo_dir=repo_dir,
+            config_path=config_path,
+            checkpoint_download_source=args.ppo_checkpoint_download_source,
+        )
+    print_json_status(
+        "checkpoint_plan",
+        stage=args.stage,
+        checkpoint_kind=checkpoint_kind,
+        checkpoint_target=checkpoint_target,
+        checkpoint_download_source_provided=bool(str(args.ppo_checkpoint_download_source or "").strip()),
+    )
+    if checkpoint_command is not None:
+        try:
+            run_command(checkpoint_command, cwd=repo_dir)
+        except Exception as exc:
+            print_json_status(
+                "checkpoint_prepare_failed",
+                stage=args.stage,
+                checkpoint_target=checkpoint_target,
+                error=str(exc),
+            )
+
     print_json_status(
         "bootstrap_complete",
         stage=args.stage,

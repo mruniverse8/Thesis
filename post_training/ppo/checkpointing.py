@@ -32,6 +32,7 @@ def save_iteration_artifacts(
     config: dict[str, Any],
     metrics: dict[str, Any],
     trajectories: Sequence,
+    create_archive: bool = False,
 ) -> Path:
     checkpoint_dir = Path(output_dir) / "checkpoints" / f"iteration-{iteration_index:04d}"
     policy_model.save_checkpoint(
@@ -39,6 +40,7 @@ def save_iteration_artifacts(
         tokenizer=tokenizer,
         config=config,
         metrics=metrics,
+        create_archive=create_archive,
     )
     write_jsonl(
         checkpoint_dir / "rollout_summary.jsonl",

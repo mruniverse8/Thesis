@@ -31,11 +31,13 @@ def save_sft_checkpoint(
     training_tokenizer,
     config: dict[str, Any],
     metrics: dict[str, Any],
-) -> None:
-    save_checkpoint(
+    create_archive: bool = False,
+) -> Path | None:
+    return save_checkpoint(
         checkpoint_dir=checkpoint_dir,
         model=model,
         training_tokenizer=training_tokenizer,
         config=config,
         metrics=metrics,
+        create_archive=create_archive,
     )

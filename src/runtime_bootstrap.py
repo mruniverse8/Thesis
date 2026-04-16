@@ -26,7 +26,6 @@ CHEBI_REQUIRED_RELATIVE_PATHS = (
     Path("data") / "chebi20" / "processed" / "test.jsonl",
 )
 
-
 @dataclass(frozen=True)
 class RuntimeEnvironment:
     name: str

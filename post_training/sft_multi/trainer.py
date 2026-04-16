@@ -249,6 +249,7 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
                     training_tokenizer=training_tokenizer,
                     config=config,
                     metrics=epoch_metrics,
+                    create_archive=True,
                 )
 
         summary = {

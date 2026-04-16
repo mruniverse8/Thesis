@@ -7,6 +7,7 @@ import torch
 from torch import nn
 from transformers import T5ForConditionalGeneration
 
+from src.checkpoint_bootstrap import archive_checkpoint_directory
 from src.io_utils import ensure_dir, write_json
 from src.tokenizer_utils import assert_tokenizer_matches_model_vocab
 
@@ -110,7 +111,12 @@ class PolicyValueModel(nn.Module):
         elif freeze_base_model_without_lora:
             freeze_module(model)
 
-        return cls(policy_model=model)
+        value_head = ScalarValueHead(model.config.d_model)
+        value_head_path = Path(checkpoint_path) / "value_head.pt"
+        if value_head_path.exists():
+            value_head.load_state_dict(torch.load(value_head_path, map_location="cpu"))
+
+        return cls(policy_model=model, value_head=value_head)
 
     def forward(self, **kwargs: Any):
         return self.policy_model(**kwargs)
@@ -148,16 +154,20 @@ class PolicyValueModel(nn.Module):
         tokenizer: Any | None = None,
         config: dict[str, Any] | None = None,
         metrics: dict[str, Any] | None = None,
-    ) -> None:
+        create_archive: bool = False,
+    ) -> Path | None:
         checkpoint_dir = ensure_dir(output_dir)
         self.policy_model.save_pretrained(checkpoint_dir)
         torch.save(self.value_head.state_dict(), checkpoint_dir / "value_head.pt")
         if tokenizer is not None:
             tokenizer.save_pretrained(checkpoint_dir)
         if config is not None:
-            write_json(checkpoint_dir / "config.json", config)
+            write_json(checkpoint_dir / "training_config.json", config)
         if metrics is not None:
             write_json(checkpoint_dir / "metrics.json", metrics)
+        if create_archive:
+            return archive_checkpoint_directory(checkpoint_dir)
+        return None
 
 
 def assert_checkpoint_tokenizer_matches_model(

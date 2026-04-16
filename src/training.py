@@ -13,6 +13,7 @@ from transformers import T5ForConditionalGeneration, get_linear_schedule_with_wa
 
 from post_training.logging import BaseTracker, NullTracker, build_tracker
 
+from .checkpoint_bootstrap import archive_checkpoint_directory
 from .datasets import TextToSelfiesCollator, TextToSelfiesDataset, move_tensor_batch_to_device
 from .io_utils import dump_yaml, ensure_dir, write_json
 from .tokenizer_utils import assert_tokenizer_matches_model_vocab, prepare_training_tokenizer
@@ -100,12 +101,17 @@ def save_checkpoint(
     training_tokenizer: Any,
     config: dict[str, Any],
     metrics: dict[str, Any],
-) -> None:
+    *,
+    create_archive: bool = False,
+) -> Path | None:
     ensure_dir(checkpoint_dir)
     model.save_pretrained(checkpoint_dir)
     training_tokenizer.save_pretrained(checkpoint_dir)
     dump_yaml(checkpoint_dir / "config.yaml", config)
     write_json(checkpoint_dir / "metrics.json", metrics)
+    if create_archive:
+        return archive_checkpoint_directory(checkpoint_dir)
+    return None
 
 
 def _build_sft_tracking_config_payload(
@@ -300,6 +306,7 @@ def train_model(config: dict[str, Any]) -> dict[str, Any]:
                     training_tokenizer=training_tokenizer,
                     config=config,
                     metrics=epoch_metrics,
+                    create_archive=True,
                 )
 
         summary = {

@@ -62,7 +62,7 @@ def resolve_ppo_config_paths(
     return resolved
 
 
-def _looks_like_remote_model_identifier(checkpoint_value: str | Path) -> bool:
+def looks_like_remote_model_identifier(checkpoint_value: str | Path) -> bool:
     checkpoint_text = str(checkpoint_value).strip()
     if not checkpoint_text:
         return False
@@ -79,6 +79,10 @@ def _looks_like_remote_model_identifier(checkpoint_value: str | Path) -> bool:
     if len(candidate.parts) != 2:
         return False
     return candidate.parts[0] not in _LOCAL_CHECKPOINT_ROOT_NAMES
+
+
+def _looks_like_remote_model_identifier(checkpoint_value: str | Path) -> bool:
+    return looks_like_remote_model_identifier(checkpoint_value)
 
 
 def resolve_ppo_checkpoint_source(

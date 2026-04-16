@@ -39,15 +39,6 @@ def standardize_tensor(values: torch.Tensor, eps: float = 1.0e-8) -> torch.Tenso
     return (values - values.mean()) / values.std(unbiased=False).clamp(min=eps)
 
 
-def compute_clipped_policy_objective(
-    ratio: torch.Tensor,
-    advantages: torch.Tensor,
-    clip_range: float,
-) -> torch.Tensor:
-    clipped_ratio = torch.clamp(ratio, 1.0 - clip_range, 1.0 + clip_range)
-    return torch.minimum(ratio * advantages, clipped_ratio * advantages)
-
-
 class MoleculeWisePPOTrainer:
     def __init__(
         self,
@@ -189,10 +180,14 @@ class MoleculeWisePPOTrainer:
                 batch_returns = returns[batch_indices]
 
                 ratio = torch.exp(new_logprobs_tensor - batch_old_logprobs)
-                clipped_objective = compute_clipped_policy_objective(
+                clipped_ratio = torch.clamp(
                     ratio,
-                    batch_advantages,
-                    clip_range=self.config.clip_range,
+                    1.0 - self.config.clip_range,
+                    1.0 + self.config.clip_range,
+                )
+                clipped_objective = torch.minimum(
+                    ratio * batch_advantages,
+                    clipped_ratio * batch_advantages,
                 )
                 kl = new_logprobs_tensor - batch_reference_logprobs
                 policy_loss = -(clipped_objective - self.config.kl_penalty * kl).mean()
@@ -262,6 +257,7 @@ class MoleculeWisePPOTrainer:
             config=self.config.to_dict(),
             metrics=metrics,
             trajectories=trajectories,
+            create_archive=iteration_index == self.config.ppo_iterations,
         )
 
 
@@ -298,15 +294,15 @@ def _build_ppo_tracking_summary(summary: dict[str, object]) -> dict[str, object]
 def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
     resolved_config = dict(config)
     model_config = dict(resolved_config.get("model", {}))
-    checkpoint_source = resolve_ppo_checkpoint_source(
+    resolved_checkpoint_path_or_id = resolve_ppo_checkpoint_source(
         model_config["checkpoint"],
         project_root=PROJECT_ROOT,
     )
-    model_config["checkpoint"] = checkpoint_source
+    model_config["checkpoint"] = resolved_checkpoint_path_or_id
     resolved_config["model"] = model_config
     config = resolved_config
 
-    tokenizer = AutoTokenizer.from_pretrained(checkpoint_source, use_fast=True)
+    tokenizer = AutoTokenizer.from_pretrained(resolved_checkpoint_path_or_id, use_fast=True)
     tokenizer.model_max_length = int(1e9)
 
     ppo_config = build_ppo_config(config)
@@ -317,7 +313,7 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
     device = choose_device(config["training"].get("device", "auto"))
 
     policy_model = PolicyValueModel.from_pretrained(
-        checkpoint_source,
+        resolved_checkpoint_path_or_id,
         use_lora=ppo_config.use_lora,
         lora_rank=ppo_config.lora_rank,
         lora_alpha=ppo_config.lora_alpha,
@@ -331,7 +327,7 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
         context="PPO policy checkpoint",
     )
     policy_model.to(device)
-    reference_model = load_reference_model(checkpoint_source)
+    reference_model = load_reference_model(resolved_checkpoint_path_or_id)
     assert_checkpoint_tokenizer_matches_model(
         tokenizer,
         reference_model,
@@ -379,7 +375,8 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
             "output_dir": str(output_dir),
             "num_iterations": ppo_config.ppo_iterations,
             "history": history,
-            "resolved_checkpoint_source": checkpoint_source,
+            "resolved_checkpoint_source": resolved_checkpoint_path_or_id,
+            "resolved_checkpoint_path_or_id": resolved_checkpoint_path_or_id,
         }
         write_json(output_dir / "run_summary.json", summary)
         tracker.log_summary(_build_ppo_tracking_summary(summary), prefix="ppo")
