@@ -69,6 +69,20 @@ def _make_repo(tmp_path: Path) -> Path:
         )
         + "\n",
     )
+    _write_text(
+        repo_dir / "configs" / "multi_molecule_gflownet_mini.yaml",
+        "\n".join(
+            [
+                "model:",
+                "  checkpoint: outputs/multi_molecule_sft_mini/checkpoints/best",
+                "data:",
+                "  train_file: data/mini_post_training/grouped_splits/train_multimol.jsonl",
+                "  validation_file: data/mini_post_training/grouped_splits/validation_multimol.jsonl",
+                "  test_file: data/mini_post_training/grouped_splits/test_multimol.jsonl",
+            ]
+        )
+        + "\n",
+    )
     return repo_dir
 
 
@@ -84,6 +98,7 @@ def test_new_bootstrap_scripts_import_cleanly() -> None:
         Path("scripts") / "download_ppo_checkpoint.py",
         Path("scripts") / "init_colab.py",
         Path("scripts") / "init_kaggle.py",
+        Path("scripts") / "train_multi_molecule_gflownet.py",
     ):
         script_path = project_root / relative_path
         spec = importlib.util.spec_from_file_location(relative_path.stem, script_path)
@@ -104,6 +119,8 @@ def test_stage_specs_use_expected_training_scripts() -> None:
     assert STAGE_SPECS["sft"].training_script == Path("scripts") / "train_sft.py"
     assert STAGE_SPECS["multi_sft"].training_script == Path("scripts") / "train_multi_molecule_sft.py"
     assert STAGE_SPECS["ppo"].training_script == Path("scripts") / "train_molecule_wise_ppo.py"
+    assert STAGE_SPECS["gflownet"].training_script == Path("scripts") / "train_multi_molecule_gflownet.py"
+    assert STAGE_SPECS["gflownet"].default_config == Path("configs") / "multi_molecule_gflownet_mini.yaml"
 
 
 def test_infer_managed_dataset_detects_chebi_sft(tmp_path: Path) -> None:
@@ -260,4 +277,3 @@ def test_archive_checkpoint_directory_writes_zip_bundle(tmp_path: Path) -> None:
             "best/config.json",
             "best/tokenizer.json",
         ]
-

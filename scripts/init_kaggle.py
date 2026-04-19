@@ -33,7 +33,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--stage",
         required=True,
-        choices=("sft", "multi_sft", "ppo"),
+        choices=("sft", "multi_sft", "ppo", "gflownet"),
         help="Training stage to prepare.",
     )
     parser.add_argument("--repo-url", default=DEFAULT_REPO_URL, help="HTTPS Git URL for the thesis repo.")

@@ -56,6 +56,11 @@ STAGE_SPECS: dict[str, StageSpec] = {
         training_script=Path("scripts") / "train_molecule_wise_ppo.py",
         default_config=Path("configs") / "molecule_wise_ppo_mini.yaml",
     ),
+    "gflownet": StageSpec(
+        stage="gflownet",
+        training_script=Path("scripts") / "train_multi_molecule_gflownet.py",
+        default_config=Path("configs") / "multi_molecule_gflownet_mini.yaml",
+    ),
 }
 
 

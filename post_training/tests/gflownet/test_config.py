@@ -7,6 +7,7 @@ from post_training.shared.config import (
     DEFAULT_PPO_FALLBACK_CHECKPOINT,
     resolve_gflownet_config_paths,
 )
+from src.io_utils import load_yaml
 
 
 def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -> None:
@@ -61,6 +62,18 @@ def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
     assert config.batch_size == 32
     assert config.rollout.max_source_length == 384
     assert config.replay.max_total_action_tokens == 50_000
+
+
+def test_multi_molecule_gflownet_mini_config_parses_for_tb_and_db() -> None:
+    config_path = Path(__file__).resolve().parents[3] / "configs" / "multi_molecule_gflownet_mini.yaml"
+    payload = load_yaml(config_path)
+
+    tb_config = build_gflownet_config(payload)
+    assert tb_config.objective == "tb"
+
+    payload["gflownet"]["objective"] = "db"
+    db_config = build_gflownet_config(payload)
+    assert db_config.objective == "db"
 
 
 def test_resolve_gflownet_config_paths_falls_back_to_original_weights_for_missing_checkpoint(
