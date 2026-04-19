@@ -6,7 +6,8 @@ This is the shortest reading path for the rewritten `post_training` package.
 
 1. [post_training/sft_multi/trainer.py](../sft_multi/trainer.py)
 2. [post_training/ppo/trainer.py](../ppo/trainer.py)
-3. [post_training/scripts/test_post_training.sh](../scripts/test_post_training.sh)
+3. [post_training/gflownet/trainer.py](../gflownet/trainer.py)
+4. [post_training/scripts/test_post_training.sh](../scripts/test_post_training.sh)
 
 ## Shared Layer
 
@@ -54,3 +55,25 @@ Main files:
 - [post_training/ppo/rewarding.py](../ppo/rewarding.py)
 - [post_training/ppo/rollout.py](../ppo/rollout.py)
 - [post_training/ppo/trainer.py](../ppo/trainer.py)
+
+## GFlowNet Flow
+
+```text
+post_training.gflownet.trainer.main
+  -> resolve_gflownet_config_paths
+  -> build_gflownet_config / build_reward_config
+  -> GFlowNetModel
+  -> sample_stage_trajectories_for_example
+  -> score_stage_terminal_reward
+  -> TB / DB update
+  -> checkpoints
+```
+
+Main files:
+
+- [post_training/gflownet/config.py](../gflownet/config.py)
+- [post_training/gflownet/model.py](../gflownet/model.py)
+- [post_training/gflownet/rewarding.py](../gflownet/rewarding.py)
+- [post_training/gflownet/rollout.py](../gflownet/rollout.py)
+- [post_training/gflownet/losses.py](../gflownet/losses.py)
+- [post_training/gflownet/trainer.py](../gflownet/trainer.py)

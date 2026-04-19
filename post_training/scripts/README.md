@@ -10,8 +10,12 @@ These wrappers keep the working directory at the repo root and run everything in
 
 ## Scripts
 
+- [../../scripts/train_multi_molecule_sft.py](../../scripts/train_multi_molecule_sft.py): compatibility entrypoint for multi-molecule SFT
+- [../../scripts/train_molecule_wise_ppo.py](../../scripts/train_molecule_wise_ppo.py): compatibility entrypoint for molecule-wise PPO
+- [../../scripts/train_multi_molecule_gflownet.py](../../scripts/train_multi_molecule_gflownet.py): compatibility entrypoint for multi-molecule GFlowNet
 - [train_multi_molecule_sft.sh](./train_multi_molecule_sft.sh): run `python -m post_training.sft_multi.trainer`
 - [train_molecule_wise_ppo.sh](./train_molecule_wise_ppo.sh): run `python -m post_training.ppo.trainer`
+- [train_multi_molecule_gflownet.sh](./train_multi_molecule_gflownet.sh): run `python -m post_training.gflownet.trainer`
 - [test_post_training.sh](./test_post_training.sh): run `pytest` on `post_training/tests`
 
 ## Examples
@@ -26,6 +30,9 @@ bash post_training/scripts/train_molecule_wise_ppo.sh
 bash post_training/scripts/train_molecule_wise_ppo.sh --config configs/molecule_wise_ppo.yaml
 
 COMET_API_KEY=... bash post_training/scripts/train_molecule_wise_ppo.sh --config configs/molecule_wise_ppo.yaml
+
+bash post_training/scripts/train_multi_molecule_gflownet.sh
+bash post_training/scripts/train_multi_molecule_gflownet.sh --config configs/multi_molecule_gflownet.yaml
 
 bash post_training/scripts/test_post_training.sh
 CONDA_ENV=thesis_biot5_sft bash post_training/scripts/test_post_training.sh post_training/tests/ppo/test_trainer.py -q

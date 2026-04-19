@@ -62,6 +62,26 @@ def resolve_ppo_config_paths(
     return resolved
 
 
+def resolve_gflownet_config_paths(
+    config: dict[str, Any],
+    project_root: Path | None = None,
+) -> dict[str, Any]:
+    resolved = resolve_config_path_fields(
+        config,
+        fields_by_section={
+            "data": ("train_file", "validation_file", "test_file"),
+            "training": ("output_dir",),
+        },
+        project_root=project_root,
+    )
+    if "model" in resolved and "checkpoint" in resolved["model"]:
+        resolved["model"]["checkpoint"] = resolve_ppo_checkpoint_source(
+            resolved["model"]["checkpoint"],
+            project_root=project_root,
+        )
+    return resolved
+
+
 def looks_like_remote_model_identifier(checkpoint_value: str | Path) -> bool:
     checkpoint_text = str(checkpoint_value).strip()
     if not checkpoint_text:

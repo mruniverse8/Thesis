@@ -1,6 +1,11 @@
 """Shared primitives for post-training."""
 
-from .config import detect_dataset_family, resolve_multi_molecule_sft_config_paths, resolve_ppo_config_paths
+from .config import (
+    detect_dataset_family,
+    resolve_gflownet_config_paths,
+    resolve_multi_molecule_sft_config_paths,
+    resolve_ppo_config_paths,
+)
 from .dataset_types import GroupedMoleculeRecord, coerce_grouped_molecule_record
 from .sequence import (
     MOL_SEPARATOR_TOKEN,
@@ -24,6 +29,7 @@ __all__ = [
     "build_stage_prefix",
     "coerce_grouped_molecule_record",
     "detect_dataset_family",
+    "resolve_gflownet_config_paths",
     "get_sequence_special_tokens",
     "parse_molecule_sequence",
     "parse_single_staged_molecule",

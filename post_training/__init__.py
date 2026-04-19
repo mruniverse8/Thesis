@@ -1,1 +1,1 @@
-"""Post-training utilities for staged multi-molecule SFT and molecule-stage PPO."""
+"""Post-training utilities for staged SFT, molecule-stage PPO, and stage-local GFlowNet."""

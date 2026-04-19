@@ -1,0 +1,60 @@
+seed: 42
+
+tracking:
+  enabled: false
+  backend: wandb
+  project: Thesis-2
+  workspace: koala-team
+  run_name:
+  tags: []
+
+model:
+  checkpoint: outputs/multi_molecule_sft/checkpoints/best
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q", "v"]
+
+data:
+  train_file: data/post_training/processed/train_multimol.jsonl
+  validation_file: data/post_training/processed/validation_multimol.jsonl
+  test_file: data/post_training/processed/test_multimol.jsonl
+  max_source_length: 512
+
+training:
+  output_dir: outputs/multi_molecule_gflownet
+  device: auto
+  save_every_iterations: 10
+
+reward:
+  fingerprint_radius: 2
+  fingerprint_num_bits: 2048
+  match_alpha: 0.5
+  diversity_beta: 1.0
+  match_weight: 1.0
+  diversity_weight: 1.0
+  reward_amplification: 8.0
+  acceptance_dice_threshold: 0.7
+  acceptance_tanimoto_threshold: 0.6
+
+gflownet:
+  gflownet_iterations: 200
+  batch_size: 64
+  objective: tb
+  learning_rate: 5.0e-5
+  max_grad_norm: 1.0
+  invalid_terminal_reward: 1.0e-4
+  replay:
+    capacity: 0
+    replay_batch_size: 0
+    max_total_action_tokens: 50000
+    with_replacement: false
+  rollout:
+    max_source_length: 512
+    max_stage_new_tokens: 128
+    max_molecules_per_sequence: 8
+    max_sequence_length: 2560
+    temperature: 1.0
+    top_p: 1.0
+    terminate_on_invalid_stage: true

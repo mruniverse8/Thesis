@@ -8,6 +8,7 @@
 - [Overall architecture](./docs/ARCHITECTURE.md)
 - [SFT guide](./docs/sft/README.md)
 - [PPO guide](./docs/ppo/README.md)
+- [GFlowNet guide](./docs/gflownet/README.md)
 - [Run scripts](./scripts/README.md)
 
 ## Package Layout
@@ -16,6 +17,7 @@
 - [post_training/logging](./logging)
 - [post_training/sft_multi](./sft_multi)
 - [post_training/ppo](./ppo)
+- [post_training/gflownet](./gflownet)
 
 ## Canonical Target Format
 
@@ -32,6 +34,7 @@ PPO still generates one molecule per stage.
 ```bash
 bash post_training/scripts/train_multi_molecule_sft.sh
 bash post_training/scripts/train_molecule_wise_ppo.sh
+bash post_training/scripts/train_multi_molecule_gflownet.sh
 bash post_training/scripts/test_post_training.sh
 ```
 
@@ -39,4 +42,4 @@ The wrapper scripts default to `CONDA_ENV=thesis_biot5_sft`.
 
 ## Tracking
 
-Minimal remote tracking is available for both SFT and PPO through the top-level `tracking:` config block. Supported backends are `wandb` and `comet`, and local JSON outputs remain unchanged.
+Minimal remote tracking is available for SFT, PPO, and GFlowNet through the top-level `tracking:` config block. Supported backends are `wandb` and `comet`, and local JSON outputs remain unchanged.
