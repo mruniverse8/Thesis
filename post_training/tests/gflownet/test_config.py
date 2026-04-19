@@ -12,6 +12,10 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     config = GFlowNetConfig.from_dict(
         {
             "objective": "db",
+            "diagnostic_log_every_iterations": 12,
+            "trajectory_preview_every_iterations": 8,
+            "trajectory_preview_num_samples": 5,
+            "trajectory_preview_max_chars": 320,
             "rollout": {
                 "max_stage_new_tokens": 96,
                 "max_molecules_per_sequence": 4,
@@ -26,6 +30,10 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     )
 
     assert config.objective == "db"
+    assert config.diagnostic_log_every_iterations == 12
+    assert config.trajectory_preview_every_iterations == 8
+    assert config.trajectory_preview_num_samples == 5
+    assert config.trajectory_preview_max_chars == 320
     assert config.rollout.max_stage_new_tokens == 96
     assert config.rollout.max_molecules_per_sequence == 4
     assert config.replay.capacity == 128
@@ -44,6 +52,22 @@ def test_gflownet_config_from_dict_accepts_legacy_max_new_tokens_field() -> None
     config = GFlowNetConfig.from_dict({"rollout": {"max_new_tokens": 80}})
 
     assert config.rollout.max_stage_new_tokens == 80
+
+
+def test_gflownet_config_from_dict_clamps_sparse_diagnostics_fields() -> None:
+    config = GFlowNetConfig.from_dict(
+        {
+            "diagnostic_log_every_iterations": 0,
+            "trajectory_preview_every_iterations": -1,
+            "trajectory_preview_num_samples": 0,
+            "trajectory_preview_max_chars": 8,
+        }
+    )
+
+    assert config.diagnostic_log_every_iterations == 1
+    assert config.trajectory_preview_every_iterations == 1
+    assert config.trajectory_preview_num_samples == 1
+    assert config.trajectory_preview_max_chars == 32
 
 
 def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
@@ -69,6 +93,10 @@ def test_multi_molecule_gflownet_mini_config_parses_for_tb_db_and_subtb() -> Non
 
     tb_config = build_gflownet_config(payload)
     assert tb_config.objective == "tb"
+    assert tb_config.diagnostic_log_every_iterations == 5
+    assert tb_config.trajectory_preview_every_iterations == 5
+    assert tb_config.trajectory_preview_num_samples == 3
+    assert tb_config.trajectory_preview_max_chars == 480
 
     payload["gflownet"]["objective"] = "db"
     db_config = build_gflownet_config(payload)

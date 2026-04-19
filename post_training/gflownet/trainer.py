@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from time import perf_counter
 from typing import Any, Sequence
 
 import torch
@@ -19,11 +20,21 @@ from post_training.sft_multi.dataset import MultiMoleculeDataset
 
 from .buffer import OnPolicyBatch, TrajectoryReplayBuffer
 from .checkpointing import (
+    append_iteration_diagnostics,
+    append_trajectory_previews,
     prepare_gflownet_output_dir,
     save_gflownet_iteration_artifacts,
     write_gflownet_history,
 )
 from .config import GFlowNetConfig, build_gflownet_config
+from .diagnostics import (
+    GFlowNetTrainIterationResult,
+    all_finite,
+    build_trajectory_preview_payload,
+    safe_rate,
+    stack_scalar_likes,
+    termination_reason_metrics,
+)
 from .losses import (
     detailed_balance_loss,
     detailed_balance_residuals,
@@ -221,68 +232,202 @@ class MultiMoleculeGFlowNetTrainer:
         examples: Sequence[dict[str, object]],
         *,
         iteration_index: int,
-    ) -> dict[str, float]:
+    ) -> GFlowNetTrainIterationResult:
+        iteration_start = perf_counter()
+        sampling_start = perf_counter()
         on_policy_trajectories = self.collect_on_policy_trajectories(
             examples,
             iteration_index=iteration_index,
         )
+        sampling_duration_sec = perf_counter() - sampling_start
         on_policy_batch = OnPolicyBatch.from_trajectories(on_policy_trajectories)
         if not on_policy_trajectories:
-            return {
+            iteration_duration_sec = perf_counter() - iteration_start
+            metrics: dict[str, Any] = {
                 "iteration": float(iteration_index),
+                "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
                 "num_on_policy_trajectories": 0.0,
+                "num_replay_trajectories": 0.0,
+                "replay_fraction": 0.0,
                 "replay_size": float(len(self.replay_buffer) if self.replay_buffer is not None else 0),
                 "replay_total_action_tokens": float(
                     self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0
                 ),
+                "sampling_duration_sec": sampling_duration_sec,
+                "replay_sampling_duration_sec": 0.0,
+                "scoring_duration_sec": 0.0,
+                "loss_duration_sec": 0.0,
+                "backward_duration_sec": 0.0,
+                "optimizer_duration_sec": 0.0,
+                "iteration_duration_sec": iteration_duration_sec,
+                "on_policy_trajectories_per_sec": 0.0,
+                "optimization_batch_trajectories_per_sec": 0.0,
+                "trajectories_per_sec": 0.0,
+                "action_tokens_per_sec": 0.0,
+                "all_finite": True,
+                **termination_reason_metrics(on_policy_trajectories),
             }
+            diagnostic_metrics = None
+            if iteration_index % self.config.diagnostic_log_every_iterations == 0:
+                diagnostic_metrics = dict(metrics)
+            return GFlowNetTrainIterationResult(
+                metrics=metrics,
+                diagnostic_metrics=diagnostic_metrics,
+            )
 
         replay_trajectories: list[SampledStageTrajectory] = []
+        replay_sampling_start = perf_counter()
         if self.replay_buffer is not None and self.config.replay.replay_batch_size > 0:
             replay_trajectories = self.replay_buffer.sample(
                 self.config.replay.replay_batch_size,
                 rng=self.replay_rng,
                 with_replacement=self.config.replay.with_replacement,
             )
+        replay_sampling_duration_sec = perf_counter() - replay_sampling_start
 
         if self.replay_buffer is not None:
             self.replay_buffer.extend(on_policy_trajectories)
 
         optimization_trajectories = [*on_policy_trajectories, *replay_trajectories]
+        scoring_start = perf_counter()
         scored_trajectories = self.score_trajectories(optimization_trajectories)
+        scoring_duration_sec = perf_counter() - scoring_start
+
+        loss_start = perf_counter()
         loss, diagnostics = self._compute_objective_loss(scored_trajectories)
+        loss_duration_sec = perf_counter() - loss_start
 
         self.optimizer.zero_grad(set_to_none=True)
+        backward_start = perf_counter()
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(),
             self.config.max_grad_norm,
         )
+        backward_duration_sec = perf_counter() - backward_start
+        optimizer_start = perf_counter()
         self.optimizer.step()
+        optimizer_duration_sec = perf_counter() - optimizer_start
+        iteration_duration_sec = perf_counter() - iteration_start
 
+        on_policy_rewards = torch.tensor(
+            [trajectory.terminal_reward for trajectory in on_policy_trajectories],
+            dtype=torch.float32,
+            device=self.device,
+        )
         optimization_rewards = torch.tensor(
             [trajectory.terminal_reward for trajectory in optimization_trajectories],
             dtype=torch.float32,
             device=self.device,
         )
-        metrics = {
+
+        action_counts = torch.tensor(
+            [trajectory.num_actions for trajectory in on_policy_trajectories],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        total_action_tokens = sum(trajectory.num_actions for trajectory in optimization_trajectories)
+        optimization_phase_duration_sec = (
+            scoring_duration_sec
+            + loss_duration_sec
+            + backward_duration_sec
+            + optimizer_duration_sec
+        )
+        all_log_pf_tokens = stack_scalar_likes(
+            [value for trajectory in scored_trajectories for value in trajectory.log_pf_tokens],
+            device=self.device,
+        )
+        all_log_pb_tokens = stack_scalar_likes(
+            [
+                value
+                for trajectory in scored_trajectories
+                for value in trajectory.effective_log_pb_tokens()
+            ],
+            device=self.device,
+        )
+        all_log_state_flows = stack_scalar_likes(
+            [value for trajectory in scored_trajectories for value in trajectory.log_state_flows],
+            device=self.device,
+        )
+        terminal_stop_logprobs = stack_scalar_likes(
+            [trajectory.log_stop[-1] for trajectory in scored_trajectories],
+            device=self.device,
+        )
+        gradient_tensors = [
+            parameter.grad.detach()
+            for parameter in self.model.parameters()
+            if parameter.grad is not None
+        ]
+
+        metrics: dict[str, Any] = {
             "iteration": float(iteration_index),
+            "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
             "objective_loss": diagnostics["objective_loss"],
             "mean_stage_reward": on_policy_batch.mean_stage_reward(),
+            "stage_reward_std": _tensor_std(on_policy_rewards),
             "mean_training_stage_reward": _tensor_mean(optimization_rewards),
+            "training_stage_reward_std": _tensor_std(optimization_rewards),
             "valid_fraction": on_policy_batch.valid_fraction(),
             "duplicate_fraction": on_policy_batch.duplicate_fraction(),
             "mean_num_actions": on_policy_batch.mean_num_actions(),
+            "max_num_actions": float(action_counts.max().item()) if action_counts.numel() > 0 else 0.0,
             "mean_stage_index": on_policy_batch.mean_stage_index(),
             "num_on_policy_trajectories": float(len(on_policy_trajectories)),
             "num_replay_trajectories": float(len(replay_trajectories)),
+            "replay_fraction": float(len(replay_trajectories) / len(optimization_trajectories)),
             "replay_size": float(len(self.replay_buffer) if self.replay_buffer is not None else 0),
             "replay_total_action_tokens": float(
                 self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0
             ),
             "grad_norm": float(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm),
+            "mean_log_pf_token": _tensor_mean(all_log_pf_tokens),
+            "mean_log_pb_token": _tensor_mean(all_log_pb_tokens),
+            "mean_log_state_flow": _tensor_mean(all_log_state_flows),
+            "sampling_duration_sec": sampling_duration_sec,
+            "replay_sampling_duration_sec": replay_sampling_duration_sec,
+            "scoring_duration_sec": scoring_duration_sec,
+            "loss_duration_sec": loss_duration_sec,
+            "backward_duration_sec": backward_duration_sec,
+            "optimizer_duration_sec": optimizer_duration_sec,
+            "iteration_duration_sec": iteration_duration_sec,
+            "on_policy_trajectories_per_sec": safe_rate(
+                len(on_policy_trajectories),
+                sampling_duration_sec,
+            ),
+            "optimization_batch_trajectories_per_sec": safe_rate(
+                len(optimization_trajectories),
+                optimization_phase_duration_sec,
+            ),
+            "trajectories_per_sec": safe_rate(
+                len(optimization_trajectories),
+                iteration_duration_sec,
+            ),
+            "action_tokens_per_sec": safe_rate(total_action_tokens, iteration_duration_sec),
+            "all_finite": all_finite(
+                loss.detach().reshape(1),
+                all_log_pf_tokens,
+                all_log_pb_tokens,
+                all_log_state_flows,
+                terminal_stop_logprobs,
+                *gradient_tensors,
+            ),
             **diagnostics,
+            **termination_reason_metrics(on_policy_trajectories),
         }
+
+        diagnostic_metrics = None
+        if iteration_index % self.config.diagnostic_log_every_iterations == 0:
+            diagnostic_metrics = dict(metrics)
+
+        trajectory_preview = None
+        if iteration_index % self.config.trajectory_preview_every_iterations == 0:
+            trajectory_preview = build_trajectory_preview_payload(
+                on_policy_trajectories,
+                iteration_index=iteration_index,
+                num_samples=self.config.trajectory_preview_num_samples,
+                max_chars=self.config.trajectory_preview_max_chars,
+                tokenizer=self.tokenizer,
+            )
 
         if (
             iteration_index % self.config.save_every_iterations == 0
@@ -294,13 +439,17 @@ class MultiMoleculeGFlowNetTrainer:
                 trajectories=on_policy_trajectories,
             )
 
-        return metrics
+        return GFlowNetTrainIterationResult(
+            metrics=metrics,
+            diagnostic_metrics=diagnostic_metrics,
+            trajectory_preview=trajectory_preview,
+        )
 
     def save_checkpoint(
         self,
         *,
         iteration_index: int,
-        metrics: dict[str, float],
+        metrics: dict[str, Any],
         trajectories: Sequence[SampledStageTrajectory],
     ):
         return save_gflownet_iteration_artifacts(
@@ -405,7 +554,7 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
     ensure_dir(output_dir)
 
     tracker: BaseTracker = NullTracker()
-    history: list[dict[str, float]] = []
+    history: list[dict[str, Any]] = []
     try:
         tracker = build_tracker(
             config,
@@ -418,10 +567,37 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
 
         for iteration in range(1, gflownet_config.gflownet_iterations + 1):
             iteration_examples = sample_examples(train_dataset, gflownet_config.batch_size)
-            metrics = trainer.train_iteration(iteration_examples, iteration_index=iteration)
-            history.append(metrics)
+            iteration_result = trainer.train_iteration(
+                iteration_examples,
+                iteration_index=iteration,
+            )
+            history.append(iteration_result.metrics)
             write_gflownet_history(output_dir, history)
-            tracker.log_metrics(metrics, step=iteration, prefix="gflownet")
+            tracker.log_metrics(iteration_result.metrics, step=iteration, prefix="gflownet")
+            if iteration_result.diagnostic_metrics is not None:
+                append_iteration_diagnostics(
+                    output_dir,
+                    [iteration_result.diagnostic_metrics],
+                )
+                tracker.log_metrics(
+                    iteration_result.diagnostic_metrics,
+                    step=iteration,
+                    prefix="gflownet_step",
+                )
+            if iteration_result.trajectory_preview is not None:
+                append_trajectory_previews(
+                    output_dir,
+                    iteration_result.trajectory_preview["records"],
+                )
+                tracker.log_summary(
+                    {
+                        "latest_trajectory_preview": iteration_result.trajectory_preview[
+                            "tracker_text"
+                        ],
+                        "latest_trajectory_preview_iteration": float(iteration),
+                    },
+                    prefix="gflownet",
+                )
 
         summary = {
             "output_dir": str(output_dir),

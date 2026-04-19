@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,6 +7,7 @@ import torch
 from src.constants import EOM_TOKEN
 
 from post_training.gflownet.config import GFlowNetConfig, ReplayConfig
+from post_training.gflownet.diagnostics import GFlowNetTrainIterationResult
 from post_training.gflownet.trajectory import SampledStageTrajectory, ScoredStageTrajectory
 from post_training.gflownet.trainer import MultiMoleculeGFlowNetTrainer, run_multi_molecule_gflownet
 from post_training.shared.config import DEFAULT_PPO_FALLBACK_CHECKPOINT, resolve_gflownet_config_paths
@@ -59,9 +61,12 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
         model=model,
         tokenizer=None,
         config=GFlowNetConfig(
-            batch_size=2,
+            batch_size=3,
             objective="tb",
             save_every_iterations=99,
+            diagnostic_log_every_iterations=1,
+            trajectory_preview_every_iterations=1,
+            trajectory_preview_num_samples=3,
             replay=ReplayConfig(capacity=8, replay_batch_size=1, max_total_action_tokens=32),
         ),
         device=torch.device("cpu"),
@@ -70,6 +75,7 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     on_policy = [
         _make_sampled_trajectory(rollout_id="fresh-1", terminal_reward=2.0),
         _make_sampled_trajectory(rollout_id="fresh-2", terminal_reward=3.0, stage_index=2),
+        _make_sampled_trajectory(rollout_id="fresh-3", terminal_reward=4.0, stage_index=3),
     ]
     replay_item = _make_sampled_trajectory(rollout_id="replay-1", terminal_reward=1.5)
     trainer.replay_buffer.add(replay_item)
@@ -105,16 +111,30 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
 
     monkeypatch.setattr(trainer, "score_trajectories", fake_score)
 
-    metrics = trainer.train_iteration([{"id": "unused"}], iteration_index=1)
+    result = trainer.train_iteration([{"id": "unused"}], iteration_index=1)
+    metrics = result.metrics
 
-    assert metrics["num_on_policy_trajectories"] == 2.0
+    assert metrics["num_on_policy_trajectories"] == 3.0
     assert metrics["num_replay_trajectories"] == 1.0
-    assert metrics["replay_size"] == 3.0
-    assert metrics["replay_total_action_tokens"] == 6.0
-    assert metrics["mean_stage_reward"] == 2.5
-    assert metrics["mean_stage_index"] == 1.5
+    assert metrics["replay_size"] == 4.0
+    assert metrics["replay_total_action_tokens"] == 8.0
+    assert metrics["mean_stage_reward"] == 3.0
+    assert metrics["mean_stage_index"] == 2.0
+    assert metrics["termination_fraction_stop_token"] == 1.0
+    assert metrics["all_finite"] is True
     assert "objective_loss" in metrics
     assert "grad_norm" in metrics
+    assert "sampling_duration_sec" in metrics
+    assert "action_tokens_per_sec" in metrics
+    assert "mean_log_pf_token" in metrics
+    assert result.diagnostic_metrics is not None
+    assert result.trajectory_preview is not None
+    assert len(result.trajectory_preview["records"]) == 3
+    assert {record["preview_slot"] for record in result.trajectory_preview["records"]} == {
+        "best",
+        "median",
+        "worst",
+    }
 
 
 def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_model_loads(
@@ -138,6 +158,7 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
     class DummyTracker:
         def __init__(self) -> None:
             self.metric_calls: list[tuple[dict[str, object], int, str]] = []
+            self.summary_calls: list[tuple[dict[str, object], str]] = []
 
         def log_config(self, payload) -> None:
             self.payload = payload
@@ -146,7 +167,7 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             self.metric_calls.append((metrics, step, prefix))
 
         def log_summary(self, summary, *, prefix: str) -> None:
-            self.summary = (summary, prefix)
+            self.summary_calls.append((summary, prefix))
 
         def finish(self, *, status: str) -> None:
             self.status = status
@@ -155,16 +176,44 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
 
-        def train_iteration(self, examples, *, iteration_index: int) -> dict[str, float]:
+        def train_iteration(self, examples, *, iteration_index: int) -> GFlowNetTrainIterationResult:
             del examples
-            return {
-                "iteration": float(iteration_index),
-                "objective_loss": 1.25,
-                "mean_stage_reward": 2.5,
-                "valid_fraction": 1.0,
-                "replay_size": 0.0,
-                "replay_total_action_tokens": 0.0,
-            }
+            return GFlowNetTrainIterationResult(
+                metrics={
+                    "iteration": float(iteration_index),
+                    "objective_loss": 1.25,
+                    "mean_stage_reward": 2.5,
+                    "valid_fraction": 1.0,
+                    "replay_size": 0.0,
+                    "replay_total_action_tokens": 0.0,
+                },
+                diagnostic_metrics={
+                    "iteration": float(iteration_index),
+                    "grad_norm": 0.5,
+                    "sampling_duration_sec": 0.25,
+                },
+                trajectory_preview={
+                    "iteration": iteration_index,
+                    "records": [
+                        {
+                            "iteration": iteration_index,
+                            "preview_slot": "best",
+                            "rollout_id": "rollout-1",
+                            "example_id": "example-1",
+                            "total_reward": 2.5,
+                            "stage_rewards": [2.5],
+                            "raw_stage_text_sequence": ["<bom>[C][C][O]<eom>"],
+                            "generated_selfies_sequence": ["[C][C][O]"],
+                            "new_action_token_ids_sequence": [[1, 2]],
+                            "new_action_text_sequence": [None],
+                            "termination_reasons": ["stop_token"],
+                            "valid_sequence": [True],
+                            "duplicate_sequence": [False],
+                        }
+                    ],
+                    "tracker_text": "preview-text",
+                },
+            )
 
     tracker = DummyTracker()
 
@@ -243,6 +292,8 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
                 "gflownet_iterations": 1,
                 "batch_size": 1,
                 "objective": "tb",
+                "diagnostic_log_every_iterations": 1,
+                "trajectory_preview_every_iterations": 1,
             },
         },
         project_root=tmp_path,
@@ -267,5 +318,51 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             },
             1,
             "gflownet",
-        )
+        ),
+        (
+            {
+                "iteration": 1.0,
+                "grad_norm": 0.5,
+                "sampling_duration_sec": 0.25,
+            },
+            1,
+            "gflownet_step",
+        ),
+    ]
+    assert tracker.summary_calls[0] == (
+        {
+            "latest_trajectory_preview": "preview-text",
+            "latest_trajectory_preview_iteration": 1.0,
+        },
+        "gflownet",
+    )
+    assert tracker.summary_calls[1][1] == "gflownet"
+    diagnostics_dir = output_dir / "diagnostics"
+    iteration_diagnostics = diagnostics_dir / "iteration_diagnostics.jsonl"
+    trajectory_previews = diagnostics_dir / "trajectory_previews.jsonl"
+    assert iteration_diagnostics.exists()
+    assert trajectory_previews.exists()
+    assert [json.loads(line) for line in iteration_diagnostics.read_text().splitlines()] == [
+        {
+            "iteration": 1.0,
+            "grad_norm": 0.5,
+            "sampling_duration_sec": 0.25,
+        }
+    ]
+    assert [json.loads(line) for line in trajectory_previews.read_text().splitlines()] == [
+        {
+            "iteration": 1,
+            "preview_slot": "best",
+            "rollout_id": "rollout-1",
+            "example_id": "example-1",
+            "total_reward": 2.5,
+            "stage_rewards": [2.5],
+            "raw_stage_text_sequence": ["<bom>[C][C][O]<eom>"],
+            "generated_selfies_sequence": ["[C][C][O]"],
+            "new_action_token_ids_sequence": [[1, 2]],
+            "new_action_text_sequence": [None],
+            "termination_reasons": ["stop_token"],
+            "valid_sequence": [True],
+            "duplicate_sequence": [False],
+        }
     ]

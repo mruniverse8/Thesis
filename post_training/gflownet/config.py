@@ -34,6 +34,10 @@ class GFlowNetConfig:
     objective: str = "tb"
     learning_rate: float = 5.0e-5
     max_grad_norm: float = 1.0
+    diagnostic_log_every_iterations: int = 25
+    trajectory_preview_every_iterations: int = 25
+    trajectory_preview_num_samples: int = 3
+    trajectory_preview_max_chars: int = 480
     invalid_terminal_reward: float = 1.0e-4
     save_every_iterations: int = 10
     use_lora: bool = True
@@ -70,6 +74,42 @@ class GFlowNetConfig:
             objective=objective,
             learning_rate=float(payload.get("learning_rate", cls.learning_rate)),
             max_grad_norm=float(payload.get("max_grad_norm", cls.max_grad_norm)),
+            diagnostic_log_every_iterations=max(
+                1,
+                int(
+                    payload.get(
+                        "diagnostic_log_every_iterations",
+                        cls.diagnostic_log_every_iterations,
+                    )
+                ),
+            ),
+            trajectory_preview_every_iterations=max(
+                1,
+                int(
+                    payload.get(
+                        "trajectory_preview_every_iterations",
+                        cls.trajectory_preview_every_iterations,
+                    )
+                ),
+            ),
+            trajectory_preview_num_samples=max(
+                1,
+                int(
+                    payload.get(
+                        "trajectory_preview_num_samples",
+                        cls.trajectory_preview_num_samples,
+                    )
+                ),
+            ),
+            trajectory_preview_max_chars=max(
+                32,
+                int(
+                    payload.get(
+                        "trajectory_preview_max_chars",
+                        cls.trajectory_preview_max_chars,
+                    )
+                ),
+            ),
             invalid_terminal_reward=max(
                 1.0e-12,
                 float(
