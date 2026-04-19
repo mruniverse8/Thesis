@@ -34,6 +34,10 @@ class PPOConfig:
     entropy_coef: float = 0.0
     max_grad_norm: float = 1.0
     save_every_iterations: int = 10
+    diagnostic_log_every_optimizer_steps: int = 25
+    trajectory_preview_every_iterations: int = 25
+    num_trajectory_samples_to_log: int = 3
+    trajectory_preview_max_chars: int = 240
     use_lora: bool = True
     freeze_base_model_without_lora: bool = False
     lora_rank: int = 16
@@ -62,6 +66,42 @@ class PPOConfig:
             max_grad_norm=float(payload.get("max_grad_norm", cls.max_grad_norm)),
             save_every_iterations=int(
                 payload.get("save_every_iterations", cls.save_every_iterations)
+            ),
+            diagnostic_log_every_optimizer_steps=max(
+                1,
+                int(
+                    payload.get(
+                        "diagnostic_log_every_optimizer_steps",
+                        cls.diagnostic_log_every_optimizer_steps,
+                    )
+                ),
+            ),
+            trajectory_preview_every_iterations=max(
+                1,
+                int(
+                    payload.get(
+                        "trajectory_preview_every_iterations",
+                        cls.trajectory_preview_every_iterations,
+                    )
+                ),
+            ),
+            num_trajectory_samples_to_log=max(
+                1,
+                int(
+                    payload.get(
+                        "num_trajectory_samples_to_log",
+                        cls.num_trajectory_samples_to_log,
+                    )
+                ),
+            ),
+            trajectory_preview_max_chars=max(
+                1,
+                int(
+                    payload.get(
+                        "trajectory_preview_max_chars",
+                        cls.trajectory_preview_max_chars,
+                    )
+                ),
             ),
             use_lora=bool(payload.get("use_lora", cls.use_lora)),
             freeze_base_model_without_lora=bool(
@@ -158,6 +198,7 @@ def build_ppo_config(config: dict[str, Any]) -> PPOConfig:
 
 @dataclass(frozen=True)
 class StageTrajectory:
+    rollout_id: str
     example_id: str
     prompt_text: str
     description: str
@@ -181,6 +222,7 @@ class StageTrajectory:
     def to_dict(self) -> dict[str, Any]:
         breakdown = self.reward_breakdown
         return {
+            "rollout_id": self.rollout_id,
             "example_id": self.example_id,
             "prompt_text": self.prompt_text,
             "description": self.description,

@@ -207,6 +207,7 @@ def sample_rollout_for_example(
     tokenizer: PreTrainedTokenizerBase,
     example: dict[str, Any],
     *,
+    rollout_id: str,
     generation_config: RolloutGenerationConfig,
     reward_config: RewardConfig | None = None,
     device: torch.device,
@@ -270,6 +271,7 @@ def sample_rollout_for_example(
         )
 
         trajectory = StageTrajectory(
+            rollout_id=rollout_id,
             example_id=example_id,
             prompt_text=prompt_text,
             description=description,
