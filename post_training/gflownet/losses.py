@@ -114,27 +114,59 @@ def subtrajectory_balance_residuals(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not 0.0 < lambda_decay <= 1.0:
         raise ValueError("lambda_decay must be in (0, 1].")
-    device, dtype = _tensor_spec(*trajectory.log_pf_tokens, *trajectory.log_stop)
+    device, dtype = _tensor_spec(
+        *trajectory.log_state_flows,
+        *trajectory.log_pf_tokens,
+        *trajectory.log_stop,
+        *trajectory.log_pb_tokens,
+    )
     residuals: list[torch.Tensor] = []
     weights: list[torch.Tensor] = []
+    backward_terms = trajectory.effective_log_pb_tokens()
+    num_prefix_states = len(trajectory.prefix_states)
+    terminal_prefix_index = num_prefix_states - 1
+    terminal_sink_index = num_prefix_states
     for start_index, end_index in enumerate_subtrajectory_pairs(
-        len(trajectory.prefix_states),
+        num_prefix_states + 1,
         include_start=include_start,
     ):
-        forward_segment = _sum_tensors(
-            trajectory.log_pf_tokens[start_index:end_index],
-            device=device,
-            dtype=dtype,
-        )
-        lhs = (
-            torch.log(torch.tensor(trajectory.prefix_rewards[start_index], device=device, dtype=dtype))
-            + forward_segment
-            + _to_tensor(trajectory.log_stop[end_index], device=device, dtype=dtype)
-        )
-        rhs = (
-            torch.log(torch.tensor(trajectory.prefix_rewards[end_index], device=device, dtype=dtype))
-            + _to_tensor(trajectory.log_stop[start_index], device=device, dtype=dtype)
-        )
+        lhs = _to_tensor(trajectory.log_state_flows[start_index], device=device, dtype=dtype)
+        if end_index == terminal_sink_index:
+            forward_segment = _sum_tensors(
+                trajectory.log_pf_tokens[start_index:terminal_prefix_index],
+                device=device,
+                dtype=dtype,
+            )
+            backward_segment = _sum_tensors(
+                backward_terms[start_index:terminal_prefix_index],
+                device=device,
+                dtype=dtype,
+            )
+            lhs = lhs + forward_segment + _to_tensor(
+                trajectory.log_stop[terminal_prefix_index],
+                device=device,
+                dtype=dtype,
+            )
+            rhs = backward_segment + torch.log(
+                torch.tensor(trajectory.terminal_reward, device=device, dtype=dtype)
+            )
+        else:
+            forward_segment = _sum_tensors(
+                trajectory.log_pf_tokens[start_index:end_index],
+                device=device,
+                dtype=dtype,
+            )
+            backward_segment = _sum_tensors(
+                backward_terms[start_index:end_index],
+                device=device,
+                dtype=dtype,
+            )
+            lhs = lhs + forward_segment
+            rhs = backward_segment + _to_tensor(
+                trajectory.log_state_flows[end_index],
+                device=device,
+                dtype=dtype,
+            )
         residuals.append(lhs - rhs)
         weights.append(
             torch.tensor(lambda_decay ** (end_index - start_index - 1), device=device, dtype=dtype)

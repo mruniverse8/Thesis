@@ -5,6 +5,8 @@ from .config import GFlowNetConfig, GFlowNetRolloutConfig, ReplayConfig, build_g
 from .losses import (
     detailed_balance_loss,
     detailed_balance_residuals,
+    subtrajectory_balance_loss,
+    subtrajectory_balance_residuals,
     trajectory_balance_loss,
     trajectory_balance_residual,
 )
@@ -38,6 +40,8 @@ __all__ = [
     "sample_stage",
     "sample_stage_trajectories_for_example",
     "score_stage_terminal_reward",
+    "subtrajectory_balance_loss",
+    "subtrajectory_balance_residuals",
     "trajectory_balance_loss",
     "trajectory_balance_residual",
 ]

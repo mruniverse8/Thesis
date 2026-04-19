@@ -48,4 +48,4 @@ trainer.main
 
 The config accepts a top-level `tracking:` block for basic `wandb` or `comet` logging.
 
-`subtb` is intentionally disabled pending a learned state-flow redesign.
+`subtb` now uses the learned state-flow head for nonterminal subtrajectory endpoints and the terminal reward for terminal endpoints.

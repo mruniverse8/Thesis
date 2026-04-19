@@ -51,12 +51,8 @@ class GFlowNetConfig:
         replay_payload = dict(payload.get("replay", {}))
         target_modules = tuple(payload.get("target_modules", ("q", "v")))
         objective = str(payload.get("objective", cls.objective)).strip().lower()
-        if objective == "subtb":
-            raise ValueError(
-                "objective 'subtb' is disabled pending a learned state-flow redesign."
-            )
-        if objective not in {"tb", "db"}:
-            raise ValueError("objective must be one of: tb, db.")
+        if objective not in {"tb", "db", "subtb"}:
+            raise ValueError("objective must be one of: tb, db, subtb.")
 
         max_stage_new_tokens = rollout_payload.get(
             "max_stage_new_tokens",

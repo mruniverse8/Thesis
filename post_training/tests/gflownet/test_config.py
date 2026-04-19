@@ -1,7 +1,5 @@
 from pathlib import Path
 
-import pytest
-
 from post_training.gflownet.config import GFlowNetConfig, build_gflownet_config
 from post_training.shared.config import (
     DEFAULT_PPO_FALLBACK_CHECKPOINT,
@@ -36,9 +34,10 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.replay.with_replacement is True
 
 
-def test_gflownet_config_from_dict_rejects_subtb_until_redesign() -> None:
-    with pytest.raises(ValueError, match="disabled pending a learned state-flow redesign"):
-        GFlowNetConfig.from_dict({"objective": "subtb"})
+def test_gflownet_config_from_dict_accepts_subtb() -> None:
+    config = GFlowNetConfig.from_dict({"objective": "subtb"})
+
+    assert config.objective == "subtb"
 
 
 def test_gflownet_config_from_dict_accepts_legacy_max_new_tokens_field() -> None:
@@ -64,7 +63,7 @@ def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
     assert config.replay.max_total_action_tokens == 50_000
 
 
-def test_multi_molecule_gflownet_mini_config_parses_for_tb_and_db() -> None:
+def test_multi_molecule_gflownet_mini_config_parses_for_tb_db_and_subtb() -> None:
     config_path = Path(__file__).resolve().parents[3] / "configs" / "multi_molecule_gflownet_mini.yaml"
     payload = load_yaml(config_path)
 
@@ -74,6 +73,10 @@ def test_multi_molecule_gflownet_mini_config_parses_for_tb_and_db() -> None:
     payload["gflownet"]["objective"] = "db"
     db_config = build_gflownet_config(payload)
     assert db_config.objective == "db"
+
+    payload["gflownet"]["objective"] = "subtb"
+    subtb_config = build_gflownet_config(payload)
+    assert subtb_config.objective == "subtb"
 
 
 def test_resolve_gflownet_config_paths_falls_back_to_original_weights_for_missing_checkpoint(

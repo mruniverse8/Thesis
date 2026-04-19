@@ -27,6 +27,8 @@ from .config import GFlowNetConfig, build_gflownet_config
 from .losses import (
     detailed_balance_loss,
     detailed_balance_residuals,
+    subtrajectory_balance_loss,
+    subtrajectory_balance_residuals,
     trajectory_balance_loss,
     trajectory_balance_residual,
 )
@@ -193,7 +195,25 @@ class MultiMoleculeGFlowNetTrainer:
             }
             return loss, diagnostics
 
-        # TODO: Re-enable SubTB only after redesigning it around learned state flows.
+        if self.config.objective == "subtb":
+            residual_sets = [
+                subtrajectory_balance_residuals(trajectory)[0] for trajectory in scored_trajectories
+            ]
+            residuals = torch.cat(residual_sets) if residual_sets else torch.zeros((), device=self.device)
+            loss = subtrajectory_balance_loss(scored_trajectories)
+            diagnostics = {
+                "objective_loss": float(loss.item()),
+                "objective_residual_mean": _tensor_mean(residuals),
+                "objective_residual_std": _tensor_std(residuals),
+                "mean_root_log_flow": _tensor_mean(
+                    torch.stack([trajectory.log_state_flows[0] for trajectory in scored_trajectories])
+                ),
+                "mean_terminal_stop_logprob": _tensor_mean(
+                    torch.stack([trajectory.log_stop[-1] for trajectory in scored_trajectories])
+                ),
+            }
+            return loss, diagnostics
+
         raise ValueError(f"Unsupported objective: {self.config.objective!r}")
 
     def train_iteration(
