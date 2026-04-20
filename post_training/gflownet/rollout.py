@@ -8,6 +8,11 @@ from transformers import PreTrainedTokenizerBase
 from reward_utils.defaults import RewardConfig
 from src.constants import EOM_TOKEN
 
+from post_training.shared.decoding import (
+    StageTokenConstraints,
+    mask_logits_to_allowed_token_ids,
+    resolve_stage_token_constraints,
+)
 from post_training.shared.sequence import build_stage_prefix, parse_single_staged_molecule
 
 from .config import GFlowNetRolloutConfig
@@ -72,13 +77,23 @@ def sample_next_token(
     *,
     temperature: float,
     top_p: float,
+    action_token_ids: Sequence[int] = (),
+    stage_token_constraints: StageTokenConstraints | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     adjusted_logits = logits / max(temperature, 1.0e-6)
+    if stage_token_constraints is not None and stage_token_constraints.enabled:
+        allowed_token_ids = stage_token_constraints.allowed_token_ids_for_prefix(action_token_ids)
+        adjusted_logits = mask_logits_to_allowed_token_ids(adjusted_logits, allowed_token_ids)
     probabilities = torch.softmax(adjusted_logits, dim=-1)
     next_token = _top_p_sample(probabilities, top_p=top_p)
     log_probs = torch.log_softmax(adjusted_logits, dim=-1)
     next_log_prob = log_probs.gather(-1, next_token).squeeze(-1)
-    entropy = -(probabilities * log_probs).sum(dim=-1)
+    entropy_terms = torch.where(
+        probabilities > 0,
+        probabilities * log_probs,
+        torch.zeros_like(probabilities),
+    )
+    entropy = -entropy_terms.sum(dim=-1)
     return next_token, next_log_prob, entropy
 
 
@@ -157,10 +172,12 @@ def sample_stage(
     attention_mask: torch.Tensor,
     decoder_prefix_ids: torch.Tensor,
     generation_config: GFlowNetRolloutConfig,
+    stage_token_constraints: StageTokenConstraints | None = None,
 ) -> dict[str, Any]:
     device = input_ids.device
     eom_token_id = tokenizer.convert_tokens_to_ids(EOM_TOKEN)
     eos_token_id = model.policy_model.config.eos_token_id
+    resolved_constraints = resolve_stage_token_constraints(model, stage_token_constraints)
 
     current_decoder_input_ids = decoder_prefix_ids.clone()
     action_token_ids: list[int] = []
@@ -185,6 +202,8 @@ def sample_stage(
                 next_logits,
                 temperature=generation_config.temperature,
                 top_p=generation_config.top_p,
+                action_token_ids=tuple(action_token_ids),
+                stage_token_constraints=resolved_constraints,
             )
             next_token_id = int(next_token.item())
 
@@ -233,6 +252,7 @@ def sample_stage_trajectories_for_example(
     reward_config: RewardConfig | None = None,
     invalid_terminal_reward: float = 1.0e-4,
     device: torch.device,
+    stage_token_constraints: StageTokenConstraints | None = None,
 ) -> list[SampledStageTrajectory]:
     prompt_inputs = encode_prompt(
         tokenizer,
@@ -267,6 +287,7 @@ def sample_stage_trajectories_for_example(
             attention_mask=prompt_inputs["attention_mask"],
             decoder_prefix_ids=decoder_prefix_ids,
             generation_config=generation_config,
+            stage_token_constraints=stage_token_constraints,
         )
         trajectory = build_sampled_stage_trajectory_from_generation(
             example=example,

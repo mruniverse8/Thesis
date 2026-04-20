@@ -15,6 +15,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from molecules.selfies import decode_biot5_selfies
 from post_training.gflownet.config import build_gflownet_config
 from post_training.gflownet.model import GFlowNetModel, assert_checkpoint_tokenizer_matches_model
 from post_training.gflownet.trainer import MultiMoleculeGFlowNetTrainer
@@ -95,11 +96,16 @@ def build_trajectory_record(
     invalid_terminal_reward: float,
 ) -> dict[str, Any]:
     record = trajectory.to_dict()
+    cleanup_result = decode_biot5_selfies(trajectory.stage_text)
     record["num_actions"] = trajectory.num_actions
     record["parsed_selfies_available"] = trajectory.sampled_selfies is not None
     record["looks_like_selfies_stage_text"] = looks_like_selfies_text(trajectory.stage_text)
     record["stage_text_has_spaces"] = bool(trajectory.stage_text.strip() and " " in trajectory.stage_text)
     record["hit_reward_floor"] = abs(trajectory.terminal_reward - invalid_terminal_reward) <= 1.0e-12
+    record["cleanup_selected_selfies"] = cleanup_result.get("selected_selfies")
+    record["recoverable_by_cleanup"] = (
+        bool(cleanup_result.get("is_valid_selfies")) and trajectory.sampled_selfies is None
+    )
     return record
 
 
@@ -124,6 +130,8 @@ def build_preview_record(
         "is_duplicate": record.get("is_duplicate"),
         "parsed_selfies_available": record.get("parsed_selfies_available"),
         "looks_like_selfies_stage_text": record.get("looks_like_selfies_stage_text"),
+        "cleanup_selected_selfies": record.get("cleanup_selected_selfies"),
+        "recoverable_by_cleanup": record.get("recoverable_by_cleanup"),
         "sampled_selfies": record.get("sampled_selfies"),
         "description_preview": truncate_text(
             str(record.get("description", "")),
@@ -175,6 +183,7 @@ def summarize_trajectories(
     num_molecule_like = sum(int(bool(record["looks_like_selfies_stage_text"])) for record in records)
     num_spaces = sum(int(bool(record["stage_text_has_spaces"])) for record in records)
     num_reward_floor = sum(int(bool(record["hit_reward_floor"])) for record in records)
+    num_cleanup_recoverable = sum(int(bool(record["recoverable_by_cleanup"])) for record in records)
     action_counts = [int(record["num_actions"]) for record in records]
     rewards = [float(record["terminal_reward"]) for record in records]
 
@@ -195,6 +204,7 @@ def summarize_trajectories(
         "looks_like_selfies_stage_text_fraction": num_molecule_like / num_trajectories,
         "stage_text_with_spaces_fraction": num_spaces / num_trajectories,
         "reward_floor_fraction": num_reward_floor / num_trajectories,
+        "recoverable_by_cleanup_fraction": num_cleanup_recoverable / num_trajectories,
         "stop_token_fraction": termination_counts.get("stop_token", 0) / num_trajectories,
         "max_stage_new_tokens_fraction": termination_counts.get("max_stage_new_tokens", 0)
         / num_trajectories,

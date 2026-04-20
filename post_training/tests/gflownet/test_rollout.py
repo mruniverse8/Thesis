@@ -1,5 +1,6 @@
 import pytest
 import torch
+from types import SimpleNamespace
 
 pytest.importorskip("selfies")
 pytest.importorskip("rdkit")
@@ -10,8 +11,10 @@ from src.constants import EOM_TOKEN
 from post_training.gflownet.config import GFlowNetRolloutConfig
 from post_training.gflownet.rollout import (
     build_sampled_stage_trajectory_from_generation,
+    sample_stage,
     sample_stage_trajectories_for_example,
 )
+from post_training.shared.decoding import StageTokenConstraints
 from post_training.shared.sequence import build_stage_prefix
 
 
@@ -190,3 +193,70 @@ def test_sample_stage_trajectories_for_example_stops_after_invalid_stage_when_co
 
     assert len(trajectories) == 1
     assert trajectories[0].is_valid is False
+
+
+def test_sample_stage_enforces_bom_and_masks_language_tokens() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+            4: "ordinary",
+        },
+        {EOM_TOKEN: 3},
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=3,
+        content_token_ids=(2,),
+    )
+
+    class DummyPolicyModel:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(eos_token_id=99)
+
+        def __call__(
+            self,
+            *,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            decoder_input_ids: torch.Tensor,
+            return_dict: bool,
+        ) -> SimpleNamespace:
+            del input_ids, attention_mask, return_dict
+            logits = torch.full((1, decoder_input_ids.size(1), 8), -20.0)
+            current_length = decoder_input_ids.size(1)
+            if current_length == 1:
+                logits[:, -1, 4] = 10.0
+                logits[:, -1, 1] = 0.0
+            elif current_length == 2:
+                logits[:, -1, 4] = 10.0
+                logits[:, -1, 2] = 0.0
+            else:
+                logits[:, -1, 4] = 10.0
+                logits[:, -1, 3] = 6.0
+                logits[:, -1, 2] = 0.0
+            return SimpleNamespace(logits=logits)
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = DummyPolicyModel()
+            self._stage_token_constraints = token_constraints
+
+        def get_stage_token_constraints(self):
+            return self._stage_token_constraints
+
+    stage_sample = sample_stage(
+        DummyModel(),
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(max_stage_new_tokens=4),
+    )
+
+    assert stage_sample["action_token_ids"] == (1, 2)
+    assert stage_sample["stop_token"] == EOM_TOKEN
+    assert stage_sample["termination_reason"] == "stop_token"
+    assert stage_sample["stage_text"] == "<bom>[C]<eom>"
+    assert stage_sample["sampled_selfies"] == "[C]"

@@ -14,10 +14,12 @@ class RolloutGenerationConfig:
     max_stage_new_tokens: int = 128
     max_molecules_per_sequence: int = 8
     max_sequence_length: int = 2560
-    temperature: float = 1.0
-    top_p: float = 1.0
+    temperature: float = 0.8
+    top_p: float = 0.95
+    constrained_decoding: bool = True
     terminate_on_invalid_stage: bool = True
     stage_separator: str = STAGE_SEPARATOR
+    selfies_dict_path: str = "molecules/dict/selfies_dict.txt"
 
 
 @dataclass(frozen=True)
@@ -143,6 +145,12 @@ class PPOConfig:
                     rollout_payload.get("temperature", RolloutGenerationConfig.temperature)
                 ),
                 top_p=float(rollout_payload.get("top_p", RolloutGenerationConfig.top_p)),
+                constrained_decoding=bool(
+                    rollout_payload.get(
+                        "constrained_decoding",
+                        RolloutGenerationConfig.constrained_decoding,
+                    )
+                ),
                 terminate_on_invalid_stage=bool(
                     rollout_payload.get(
                         "terminate_on_invalid_stage",
@@ -151,6 +159,12 @@ class PPOConfig:
                 ),
                 stage_separator=str(
                     rollout_payload.get("stage_separator", RolloutGenerationConfig.stage_separator)
+                ),
+                selfies_dict_path=str(
+                    rollout_payload.get(
+                        "selfies_dict_path",
+                        RolloutGenerationConfig.selfies_dict_path,
+                    )
                 ),
             ),
         )

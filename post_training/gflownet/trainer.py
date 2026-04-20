@@ -16,6 +16,10 @@ from src.training import choose_device
 
 from post_training.logging import BaseTracker, NullTracker, build_tracker
 from post_training.shared.config import resolve_gflownet_config_paths, resolve_ppo_checkpoint_source
+from post_training.shared.decoding import (
+    StageTokenConstraints,
+    build_stage_token_constraints,
+)
 from post_training.sft_multi.dataset import MultiMoleculeDataset
 
 from .buffer import OnPolicyBatch, TrajectoryReplayBuffer
@@ -70,12 +74,18 @@ class MultiMoleculeGFlowNetTrainer:
         config: GFlowNetConfig,
         reward_config: RewardConfig | None = None,
         device: torch.device | None = None,
+        stage_token_constraints: StageTokenConstraints | None = None,
     ) -> None:
         self.model = model
         self.tokenizer = tokenizer
         self.config = config
         self.reward_config = reward_config
         self.device = device or next(model.parameters()).device
+        set_constraints = getattr(self.model, "set_stage_token_constraints", None)
+        if callable(set_constraints):
+            set_constraints(stage_token_constraints)
+        elif stage_token_constraints is not None:
+            setattr(self.model, "_stage_token_constraints", stage_token_constraints)
         self.model.to(self.device)
 
         trainable_parameters = [
@@ -537,6 +547,25 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
     )
     model.to(device)
 
+    train_dataset = MultiMoleculeDataset.from_jsonl(config["data"]["train_file"])
+    set_constraints = getattr(model, "set_stage_token_constraints", None)
+    if gflownet_config.rollout.constrained_decoding:
+        stage_token_constraints = build_stage_token_constraints(
+            tokenizer,
+            train_dataset,
+            selfies_dict_path=gflownet_config.rollout.selfies_dict_path,
+            separator_token=gflownet_config.rollout.stage_separator,
+        )
+        if callable(set_constraints):
+            set_constraints(stage_token_constraints)
+        else:
+            setattr(model, "_stage_token_constraints", stage_token_constraints)
+    else:
+        if callable(set_constraints):
+            set_constraints(None)
+        else:
+            setattr(model, "_stage_token_constraints", None)
+
     trainer = MultiMoleculeGFlowNetTrainer(
         model=model,
         tokenizer=tokenizer,
@@ -545,7 +574,6 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
         device=device,
     )
 
-    train_dataset = MultiMoleculeDataset.from_jsonl(config["data"]["train_file"])
     output_dir = prepare_gflownet_output_dir(
         gflownet_config.output_dir,
         config=config,

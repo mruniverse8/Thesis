@@ -54,7 +54,9 @@ ppo:
     max_stage_new_tokens: 128
     max_molecules_per_sequence: 8
     max_sequence_length: 2560
-    temperature: 1.0
-    top_p: 1.0
+    temperature: 0.8
+    top_p: 0.95
+    constrained_decoding: true
+    selfies_dict_path: molecules/dict/selfies_dict.txt
     terminate_on_invalid_stage: true
     molecule_separator_token: <mol_sep>

@@ -8,6 +8,11 @@ from transformers import PreTrainedTokenizerBase, T5ForConditionalGeneration
 from reward_utils.defaults import RewardConfig
 from src.constants import EOM_TOKEN
 
+from post_training.shared.decoding import (
+    StageTokenConstraints,
+    mask_logits_to_allowed_token_ids,
+    resolve_stage_token_constraints,
+)
 from post_training.shared.sequence import build_stage_prefix, parse_single_staged_molecule
 
 from .config import RolloutGenerationConfig, StageTrajectory
@@ -71,27 +76,39 @@ def sample_next_token(
     *,
     temperature: float,
     top_p: float,
+    action_token_ids: Sequence[int] = (),
+    stage_token_constraints: StageTokenConstraints | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     adjusted_logits = logits / max(temperature, 1.0e-6)
+    if stage_token_constraints is not None and stage_token_constraints.enabled:
+        allowed_token_ids = stage_token_constraints.allowed_token_ids_for_prefix(action_token_ids)
+        adjusted_logits = mask_logits_to_allowed_token_ids(adjusted_logits, allowed_token_ids)
     probabilities = torch.softmax(adjusted_logits, dim=-1)
     next_token = _top_p_sample(probabilities, top_p=top_p)
     log_probs = torch.log_softmax(adjusted_logits, dim=-1)
     next_log_prob = log_probs.gather(-1, next_token).squeeze(-1)
-    entropy = -(probabilities * log_probs).sum(dim=-1)
+    entropy_terms = torch.where(
+        probabilities > 0,
+        probabilities * log_probs,
+        torch.zeros_like(probabilities),
+    )
+    entropy = -entropy_terms.sum(dim=-1)
     return next_token, next_log_prob, entropy
 
 
 def compute_action_stats(
-    model: T5ForConditionalGeneration,
+    model: T5ForConditionalGeneration | PolicyValueModel,
     *,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
     decoder_input_ids: torch.Tensor,
     action_token_ids: Sequence[int],
+    stage_token_constraints: StageTokenConstraints | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if not action_token_ids:
         zero = torch.zeros((), device=input_ids.device)
         return zero, zero
+    resolved_constraints = resolve_stage_token_constraints(model, stage_token_constraints)
 
     # Shape actions as a single decoder continuation: [a_1, a_2, ..., a_T].
     action_tokens = torch.tensor(
@@ -124,11 +141,25 @@ def compute_action_stats(
     # so we slice from the last prefix position onward to get exactly T action logits.
     action_start_index = decoder_input_ids.size(1) - 1
     action_logits = outputs.logits[:, action_start_index:, :]
-    log_probs = torch.log_softmax(action_logits, dim=-1)
-    probabilities = torch.softmax(action_logits, dim=-1)
-    selected_log_probs = log_probs.gather(-1, action_tokens.unsqueeze(-1)).squeeze(-1)
-    token_entropies = -(probabilities * log_probs).sum(dim=-1)
-    return selected_log_probs.sum(), token_entropies.sum()
+    selected_log_probs: list[torch.Tensor] = []
+    token_entropies: list[torch.Tensor] = []
+    for position, token_id in enumerate(action_token_ids):
+        step_logits = action_logits[:, position, :]
+        if resolved_constraints is not None and resolved_constraints.enabled:
+            allowed_token_ids = resolved_constraints.allowed_token_ids_for_prefix(
+                action_token_ids[:position]
+            )
+            step_logits = mask_logits_to_allowed_token_ids(step_logits, allowed_token_ids)
+        step_log_probs = torch.log_softmax(step_logits, dim=-1)
+        step_probabilities = torch.softmax(step_logits, dim=-1)
+        selected_log_probs.append(step_log_probs[:, int(token_id)])
+        entropy_terms = torch.where(
+            step_probabilities > 0,
+            step_probabilities * step_log_probs,
+            torch.zeros_like(step_probabilities),
+        )
+        token_entropies.append(-entropy_terms.sum(dim=-1))
+    return torch.stack(selected_log_probs).sum(), torch.stack(token_entropies).sum()
 
 
 def sample_stage(
@@ -139,9 +170,11 @@ def sample_stage(
     attention_mask: torch.Tensor,
     decoder_prefix_ids: torch.Tensor,
     generation_config: RolloutGenerationConfig,
+    stage_token_constraints: StageTokenConstraints | None = None,
 ) -> dict[str, Any]:
     device = input_ids.device
     eom_token_id = tokenizer.convert_tokens_to_ids(EOM_TOKEN)
+    resolved_constraints = resolve_stage_token_constraints(policy_model, stage_token_constraints)
 
     current_decoder_input_ids = decoder_prefix_ids.clone()
     action_token_ids: list[int] = []
@@ -168,6 +201,8 @@ def sample_stage(
                 next_logits,
                 temperature=generation_config.temperature,
                 top_p=generation_config.top_p,
+                action_token_ids=tuple(action_token_ids),
+                stage_token_constraints=resolved_constraints,
             )
             next_token_id = int(next_token.item())
             action_token_ids.append(next_token_id)
@@ -211,6 +246,7 @@ def sample_rollout_for_example(
     generation_config: RolloutGenerationConfig,
     reward_config: RewardConfig | None = None,
     device: torch.device,
+    stage_token_constraints: StageTokenConstraints | None = None,
 ) -> list[StageTrajectory]:
     prompt_text = str(example["prompt"])
     description = str(example["description"])
@@ -227,9 +263,13 @@ def sample_rollout_for_example(
     planned_stage_count = max(1, min(generation_config.max_molecules_per_sequence, len(target_selfies_list)))
     previous_selfies: list[str] = []
     trajectories: list[StageTrajectory] = []
+    resolved_constraints = resolve_stage_token_constraints(policy_model, stage_token_constraints)
 
     for stage_index in range(1, planned_stage_count + 1):
-        prefix_text = build_stage_prefix(previous_selfies)
+        prefix_text = build_stage_prefix(
+            previous_selfies,
+            separator_token=generation_config.stage_separator,
+        )
         decoder_prefix_ids = encode_decoder_prefix(
             tokenizer,
             prefix_text,
@@ -253,6 +293,7 @@ def sample_rollout_for_example(
             attention_mask=prompt_inputs["attention_mask"],
             decoder_prefix_ids=decoder_prefix_ids,
             generation_config=generation_config,
+            stage_token_constraints=resolved_constraints,
         )
 
         reference_logprob_sum, _ = compute_action_stats(
@@ -261,6 +302,7 @@ def sample_rollout_for_example(
             attention_mask=prompt_inputs["attention_mask"],
             decoder_input_ids=decoder_prefix_ids,
             action_token_ids=stage_sample["action_token_ids"],
+            stage_token_constraints=resolved_constraints,
         )
 
         reward_breakdown = score_stage_reward(

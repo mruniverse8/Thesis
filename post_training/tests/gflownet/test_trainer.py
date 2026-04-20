@@ -10,6 +10,7 @@ from post_training.gflownet.config import GFlowNetConfig, ReplayConfig
 from post_training.gflownet.diagnostics import GFlowNetTrainIterationResult
 from post_training.gflownet.trajectory import SampledStageTrajectory, ScoredStageTrajectory
 from post_training.gflownet.trainer import MultiMoleculeGFlowNetTrainer, run_multi_molecule_gflownet
+from post_training.shared.decoding import StageTokenConstraints
 from post_training.shared.config import DEFAULT_PPO_FALLBACK_CHECKPOINT, resolve_gflownet_config_paths
 
 
@@ -140,6 +141,7 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
 def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_model_loads(
     monkeypatch,
     tmp_path: Path,
+    capsys,
 ) -> None:
     load_calls: list[tuple[str, str]] = []
     output_dir = tmp_path / "outputs" / "multi_molecule_gflownet"
@@ -294,14 +296,18 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
                 "objective": "tb",
                 "diagnostic_log_every_iterations": 1,
                 "trajectory_preview_every_iterations": 1,
+                "rollout": {"constrained_decoding": False},
             },
         },
         project_root=tmp_path,
     )
 
     summary = run_multi_molecule_gflownet(config)
+    captured = capsys.readouterr()
 
     assert summary["resolved_checkpoint_source"] == DEFAULT_PPO_FALLBACK_CHECKPOINT
+    assert "[gflownet][iteration 1] trajectory preview" in captured.out
+    assert "preview-text" in captured.out
     assert load_calls == [
         ("tokenizer", DEFAULT_PPO_FALLBACK_CHECKPOINT),
         ("model", DEFAULT_PPO_FALLBACK_CHECKPOINT),
@@ -366,3 +372,255 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "duplicate_sequence": [False],
         }
     ]
+
+
+def test_run_multi_molecule_gflownet_builds_constraints_once_and_attaches_to_model(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs" / "multi_molecule_gflownet"
+    built_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=2,
+        content_token_ids=(3, 4),
+    )
+    builder_calls: list[tuple[str, str]] = []
+
+    class DummyTokenizer:
+        def __init__(self) -> None:
+            self.model_max_length = 0
+
+    class DummyGFlowNetModel:
+        def __init__(self) -> None:
+            self.policy_model = object()
+            self.constraints: list[StageTokenConstraints | None] = []
+
+        def to(self, device) -> None:
+            self.device = device
+
+        def set_stage_token_constraints(self, constraints) -> None:
+            self.constraints.append(constraints)
+
+        def get_stage_token_constraints(self):
+            return self.constraints[-1] if self.constraints else None
+
+    class DummyTracker:
+        def log_config(self, payload) -> None:
+            self.payload = payload
+
+        def log_metrics(self, metrics, *, step: int, prefix: str) -> None:
+            del metrics, step, prefix
+
+        def log_summary(self, summary, *, prefix: str) -> None:
+            del summary, prefix
+
+        def finish(self, *, status: str) -> None:
+            self.status = status
+
+    class DummyTrainer:
+        model = None
+
+        def __init__(self, **kwargs) -> None:
+            type(self).model = kwargs["model"]
+
+    model = DummyGFlowNetModel()
+
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.AutoTokenizer",
+        SimpleNamespace(from_pretrained=lambda *args, **kwargs: DummyTokenizer()),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.GFlowNetModel",
+        SimpleNamespace(from_pretrained=lambda *args, **kwargs: model),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.assert_checkpoint_tokenizer_matches_model",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.build_reward_config",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.choose_device",
+        lambda *_args, **_kwargs: torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.MultiMoleculeGFlowNetTrainer",
+        DummyTrainer,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.MultiMoleculeDataset",
+        SimpleNamespace(
+            from_jsonl=lambda path: [
+                {
+                    "id": "example-1",
+                    "prompt": "prompt",
+                    "description": "description",
+                    "target_selfies_list": ["[C]"],
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.prepare_gflownet_output_dir",
+        lambda *_args, **_kwargs: output_dir,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.build_tracker",
+        lambda *args, **kwargs: DummyTracker(),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.build_stage_token_constraints",
+        lambda _tokenizer, _dataset, *, selfies_dict_path, separator_token: (
+            builder_calls.append((selfies_dict_path, separator_token)),
+            built_constraints,
+        )[1],
+    )
+
+    config = resolve_gflownet_config_paths(
+        {
+            "tracking": {"enabled": False},
+            "model": {"checkpoint": DEFAULT_PPO_FALLBACK_CHECKPOINT, "use_lora": False},
+            "data": {
+                "train_file": "data/train_multimol.jsonl",
+                "validation_file": "data/validation_multimol.jsonl",
+                "test_file": "data/test_multimol.jsonl",
+                "max_source_length": 512,
+            },
+            "training": {
+                "output_dir": str(output_dir),
+                "device": "cpu",
+                "save_every_iterations": 10,
+            },
+            "gflownet": {
+                "gflownet_iterations": 0,
+                "batch_size": 1,
+                "objective": "tb",
+                "rollout": {
+                    "constrained_decoding": True,
+                    "selfies_dict_path": "custom_selfies_dict.txt",
+                },
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    run_multi_molecule_gflownet(config)
+
+    assert builder_calls == [("custom_selfies_dict.txt", " ")]
+    assert model.constraints == [built_constraints]
+    assert DummyTrainer.model.get_stage_token_constraints() is built_constraints
+
+
+def test_run_multi_molecule_gflownet_skips_constraint_initialization_when_disabled(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs" / "multi_molecule_gflownet"
+
+    class DummyTokenizer:
+        def __init__(self) -> None:
+            self.model_max_length = 0
+
+    class DummyGFlowNetModel:
+        def __init__(self) -> None:
+            self.policy_model = object()
+            self.constraints: list[StageTokenConstraints | None] = []
+
+        def to(self, device) -> None:
+            self.device = device
+
+        def set_stage_token_constraints(self, constraints) -> None:
+            self.constraints.append(constraints)
+
+    class DummyTracker:
+        def log_config(self, payload) -> None:
+            self.payload = payload
+
+        def log_metrics(self, metrics, *, step: int, prefix: str) -> None:
+            del metrics, step, prefix
+
+        def log_summary(self, summary, *, prefix: str) -> None:
+            del summary, prefix
+
+        def finish(self, *, status: str) -> None:
+            self.status = status
+
+    class DummyTrainer:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+    model = DummyGFlowNetModel()
+
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.AutoTokenizer",
+        SimpleNamespace(from_pretrained=lambda *args, **kwargs: DummyTokenizer()),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.GFlowNetModel",
+        SimpleNamespace(from_pretrained=lambda *args, **kwargs: model),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.assert_checkpoint_tokenizer_matches_model",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.build_reward_config",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.choose_device",
+        lambda *_args, **_kwargs: torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.MultiMoleculeGFlowNetTrainer",
+        DummyTrainer,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.MultiMoleculeDataset",
+        SimpleNamespace(from_jsonl=lambda path: []),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.prepare_gflownet_output_dir",
+        lambda *_args, **_kwargs: output_dir,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.build_tracker",
+        lambda *args, **kwargs: DummyTracker(),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.build_stage_token_constraints",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("builder should not be called when constrained decoding is disabled")
+        ),
+    )
+
+    config = resolve_gflownet_config_paths(
+        {
+            "tracking": {"enabled": False},
+            "model": {"checkpoint": DEFAULT_PPO_FALLBACK_CHECKPOINT, "use_lora": False},
+            "data": {
+                "train_file": "data/train_multimol.jsonl",
+                "validation_file": "data/validation_multimol.jsonl",
+                "test_file": "data/test_multimol.jsonl",
+                "max_source_length": 512,
+            },
+            "training": {
+                "output_dir": str(output_dir),
+                "device": "cpu",
+                "save_every_iterations": 10,
+            },
+            "gflownet": {
+                "gflownet_iterations": 0,
+                "batch_size": 1,
+                "objective": "tb",
+                "rollout": {"constrained_decoding": False},
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    run_multi_molecule_gflownet(config)
+
+    assert model.constraints == [None]

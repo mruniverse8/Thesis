@@ -17,6 +17,10 @@ from src.training import choose_device
 
 from post_training.logging import BaseTracker, NullTracker, build_tracker
 from post_training.shared.config import resolve_ppo_checkpoint_source, resolve_ppo_config_paths
+from post_training.shared.decoding import (
+    StageTokenConstraints,
+    build_stage_token_constraints,
+)
 from post_training.sft_multi.dataset import MultiMoleculeDataset
 
 from .checkpointing import (
@@ -213,6 +217,7 @@ class MoleculeWisePPOTrainer:
         config: PPOConfig,
         reward_config: RewardConfig | None = None,
         device: torch.device | None = None,
+        stage_token_constraints: StageTokenConstraints | None = None,
     ) -> None:
         self.policy_model = policy_model
         self.reference_model = reference_model
@@ -220,6 +225,11 @@ class MoleculeWisePPOTrainer:
         self.config = config
         self.reward_config = reward_config
         self.device = device or next(policy_model.parameters()).device
+        set_constraints = getattr(self.policy_model, "set_stage_token_constraints", None)
+        if callable(set_constraints):
+            set_constraints(stage_token_constraints)
+        elif stage_token_constraints is not None:
+            setattr(self.policy_model, "_stage_token_constraints", stage_token_constraints)
         self.policy_model.to(self.device)
         self.reference_model.to(self.device)
         self.reference_model.eval()
@@ -269,7 +279,7 @@ class MoleculeWisePPOTrainer:
         )
 
         logprob_sum, entropy_sum = compute_action_stats(
-            self.policy_model.policy_model,
+            self.policy_model,
             input_ids=prompt_inputs["input_ids"],
             attention_mask=prompt_inputs["attention_mask"],
             decoder_input_ids=decoder_prefix_ids,
@@ -588,6 +598,25 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
     )
     reference_model.to(device)
 
+    train_dataset = MultiMoleculeDataset.from_jsonl(config["data"]["train_file"])
+    set_constraints = getattr(policy_model, "set_stage_token_constraints", None)
+    if ppo_config.rollout.constrained_decoding:
+        stage_token_constraints = build_stage_token_constraints(
+            tokenizer,
+            train_dataset,
+            selfies_dict_path=ppo_config.rollout.selfies_dict_path,
+            separator_token=ppo_config.rollout.stage_separator,
+        )
+        if callable(set_constraints):
+            set_constraints(stage_token_constraints)
+        else:
+            setattr(policy_model, "_stage_token_constraints", stage_token_constraints)
+    else:
+        if callable(set_constraints):
+            set_constraints(None)
+        else:
+            setattr(policy_model, "_stage_token_constraints", None)
+
     trainer = MoleculeWisePPOTrainer(
         policy_model=policy_model,
         reference_model=reference_model,
@@ -597,7 +626,6 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
         device=device,
     )
 
-    train_dataset = MultiMoleculeDataset.from_jsonl(config["data"]["train_file"])
     output_dir = prepare_ppo_output_dir(
         ppo_config.output_dir,
         config=config,

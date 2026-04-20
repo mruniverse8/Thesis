@@ -7,6 +7,10 @@ import torch
 from torch import nn
 from transformers import T5ForConditionalGeneration
 
+from post_training.shared.decoding import (
+    StageTokenConstraints,
+    mask_logits_to_allowed_token_ids,
+)
 from src.checkpoint_bootstrap import archive_checkpoint_directory
 from src.io_utils import ensure_dir, write_json
 from src.tokenizer_utils import assert_tokenizer_matches_model_vocab
@@ -61,6 +65,7 @@ class GFlowNetModel(nn.Module):
         super().__init__()
         self.policy_model = policy_model
         self.flow_head = flow_head or ScalarFlowHead(policy_model.config.d_model)
+        self._stage_token_constraints: StageTokenConstraints | None = None
 
     @classmethod
     def from_pretrained(
@@ -100,6 +105,15 @@ class GFlowNetModel(nn.Module):
     def generate(self, *args: Any, **kwargs: Any):
         return self.policy_model.generate(*args, **kwargs)
 
+    def set_stage_token_constraints(
+        self,
+        stage_token_constraints: StageTokenConstraints | None,
+    ) -> None:
+        self._stage_token_constraints = stage_token_constraints
+
+    def get_stage_token_constraints(self) -> StageTokenConstraints | None:
+        return self._stage_token_constraints
+
     def score_action_sequence(
         self,
         *,
@@ -108,9 +122,15 @@ class GFlowNetModel(nn.Module):
         decoder_prefix_ids: torch.Tensor,
         action_token_ids: Sequence[int],
         stop_token_id: int,
+        stage_token_constraints: StageTokenConstraints | None = None,
     ) -> tuple[tuple[torch.Tensor, ...], tuple[torch.Tensor, ...], tuple[torch.Tensor, ...]]:
         if decoder_prefix_ids.ndim != 2 or decoder_prefix_ids.size(0) != 1:
             raise ValueError("decoder_prefix_ids must have shape [1, prefix_length].")
+        resolved_constraints = (
+            stage_token_constraints
+            if stage_token_constraints is not None
+            else self.get_stage_token_constraints()
+        )
 
         if action_token_ids:
             action_tokens = torch.tensor(
@@ -131,32 +151,32 @@ class GFlowNetModel(nn.Module):
             return_dict=True,
         )
 
-        log_probs = torch.log_softmax(outputs.logits[0], dim=-1)
         action_start_index = decoder_prefix_ids.size(1) - 1
-        stop_slice = log_probs[
-            action_start_index : action_start_index + len(action_token_ids) + 1,
-            stop_token_id,
+        position_logits = outputs.logits[0][
+            action_start_index : action_start_index + len(action_token_ids) + 1
         ]
-        stop_log_probs = tuple(stop_slice.unbind())
-
-        action_log_probs: tuple[torch.Tensor, ...]
-        if action_token_ids:
-            action_token_tensor = torch.tensor(
-                [int(token_id) for token_id in action_token_ids],
-                dtype=torch.long,
-                device=input_ids.device,
-            )
-            action_slice = log_probs[action_start_index : action_start_index + len(action_token_ids)]
-            selected = action_slice.gather(-1, action_token_tensor.unsqueeze(-1)).squeeze(-1)
-            action_log_probs = tuple(selected.unbind())
-        else:
-            action_log_probs = ()
+        stop_log_probs: list[torch.Tensor] = []
+        action_log_probs: list[torch.Tensor] = []
+        for position, raw_logits in enumerate(position_logits):
+            step_logits = raw_logits
+            if resolved_constraints is not None and resolved_constraints.enabled:
+                allowed_token_ids = resolved_constraints.allowed_token_ids_for_prefix(
+                    action_token_ids[:position]
+                )
+                step_logits = mask_logits_to_allowed_token_ids(
+                    step_logits.unsqueeze(0),
+                    allowed_token_ids,
+                ).squeeze(0)
+            step_log_probs = torch.log_softmax(step_logits, dim=-1)
+            stop_log_probs.append(step_log_probs[int(stop_token_id)])
+            if position < len(action_token_ids):
+                action_log_probs.append(step_log_probs[int(action_token_ids[position])])
 
         final_decoder_state = outputs.decoder_hidden_states[-1][0][
             action_start_index : action_start_index + len(action_token_ids) + 1
         ]
         prefix_log_flows = tuple(self.flow_head(final_decoder_state).unbind())
-        return action_log_probs, stop_log_probs, prefix_log_flows
+        return tuple(action_log_probs), tuple(stop_log_probs), prefix_log_flows
 
     def save_checkpoint(
         self,

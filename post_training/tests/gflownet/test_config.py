@@ -70,6 +70,15 @@ def test_gflownet_config_from_dict_clamps_sparse_diagnostics_fields() -> None:
     assert config.trajectory_preview_max_chars == 32
 
 
+def test_gflownet_rollout_defaults_enable_constrained_decoding_and_tighter_sampling() -> None:
+    config = GFlowNetConfig.from_dict({})
+
+    assert config.rollout.temperature == 0.8
+    assert config.rollout.top_p == 0.95
+    assert config.rollout.constrained_decoding is True
+    assert config.rollout.selfies_dict_path == "molecules/dict/selfies_dict.txt"
+
+
 def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
     config = build_gflownet_config(
         {

@@ -50,3 +50,40 @@ def prepare_training_tokenizer(
         "added_special_tokens": 0,
     }
     return tokenizer, metadata
+
+
+def summarize_tokenizer_encoding(
+    tokenizer: Any,
+    text: str,
+) -> dict[str, Any]:
+    encoded = tokenizer(text, add_special_tokens=False)
+    input_ids = encoded["input_ids"]
+    if input_ids and isinstance(input_ids[0], list):
+        token_ids = [int(token_id) for token_id in input_ids[0]]
+    else:
+        token_ids = [int(token_id) for token_id in input_ids]
+
+    tokens: list[str] | None = None
+    if hasattr(tokenizer, "convert_ids_to_tokens"):
+        try:
+            tokens = [str(token) for token in tokenizer.convert_ids_to_tokens(token_ids)]
+        except Exception:
+            tokens = None
+
+    return {
+        "text": str(text),
+        "num_tokens": len(token_ids),
+        "input_ids": token_ids,
+        "tokens": tokens,
+    }
+
+
+def build_tokenizer_comparison_report(
+    *,
+    tokenizers: dict[str, Any],
+    texts: Sequence[str],
+) -> dict[str, list[dict[str, Any]]]:
+    return {
+        str(name): [summarize_tokenizer_encoding(tokenizer, text) for text in texts]
+        for name, tokenizer in tokenizers.items()
+    }

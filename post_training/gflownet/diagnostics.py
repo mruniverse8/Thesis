@@ -7,6 +7,8 @@ from typing import Any, Sequence
 
 import torch
 
+from molecules.selfies import decode_biot5_selfies
+
 from .trajectory import SampledStageTrajectory
 
 
@@ -33,6 +35,18 @@ def _decode_action_text(tokenizer, action_token_ids: Sequence[int]) -> str | Non
     except Exception:
         return None
     return decoded or None
+
+
+def _cleanup_decode_stage_text(stage_text: str) -> dict[str, Any]:
+    try:
+        return decode_biot5_selfies(stage_text)
+    except Exception as exc:
+        return {
+            "selected_selfies": None,
+            "is_valid_selfies": False,
+            "used_filter_selfies_fallback": False,
+            "selfies_decode_error": f"{type(exc).__name__}: {exc}",
+        }
 
 
 def all_finite(*tensors: torch.Tensor) -> bool:
@@ -119,6 +133,10 @@ def build_trajectory_preview_payload(
     preview_candidates: list[dict[str, Any]] = []
     for rollout in grouped_trajectories.values():
         ordered_rollout = sorted(rollout, key=lambda trajectory: trajectory.stage_index)
+        cleanup_results = [
+            _cleanup_decode_stage_text(str(trajectory.stage_text))
+            for trajectory in ordered_rollout
+        ]
         preview_candidates.append(
             {
                 "iteration": iteration_index,
@@ -137,6 +155,13 @@ def build_trajectory_preview_payload(
                 ],
                 "raw_stage_text_sequence": [
                     str(trajectory.stage_text) for trajectory in ordered_rollout
+                ],
+                "cleanup_selected_selfies_sequence": [
+                    result.get("selected_selfies") for result in cleanup_results
+                ],
+                "recoverable_by_cleanup_sequence": [
+                    bool(result.get("is_valid_selfies")) and trajectory.sampled_selfies is None
+                    for trajectory, result in zip(ordered_rollout, cleanup_results)
                 ],
                 "new_action_token_ids_sequence": [
                     list(trajectory.action_token_ids) for trajectory in ordered_rollout
@@ -223,11 +248,19 @@ def build_trajectory_preview_payload(
                             max_chars=max_chars,
                         )
                     ),
+                    (
+                        "cleanup_selected_selfies="
+                        + _render_sequence(
+                            record["cleanup_selected_selfies_sequence"],
+                            max_chars=max_chars,
+                        )
+                    ),
                     f"new_actions={rendered_actions}",
                     f"stage_rewards={record['stage_rewards']}",
                     f"termination_reasons={record['termination_reasons']}",
                     f"valid_sequence={record['valid_sequence']}",
                     f"duplicate_sequence={record['duplicate_sequence']}",
+                    f"recoverable_by_cleanup={record['recoverable_by_cleanup_sequence']}",
                 ]
             )
         )

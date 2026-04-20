@@ -30,3 +30,21 @@ def test_build_stage_prefix_and_append_stage() -> None:
 def test_parse_single_staged_molecule_requires_wrappers() -> None:
     assert parse_single_staged_molecule("<bom>[C][O]<eom>") == "[C][O]"
     assert parse_single_staged_molecule("[C][O]") is None
+
+
+def test_parse_staged_target_rejects_wrapped_words_and_unwrapped_tail() -> None:
+    wrapped_plain_words = "<bom>alpha beta gamma<eom>"
+    wrapped_malformed_selfies = "<bom>[C] alpha [O]<eom>"
+    unwrapped_tail = "[N][C]"
+    text = f"{wrapped_plain_words} {wrapped_malformed_selfies} {unwrapped_tail}"
+
+    assert parse_single_staged_molecule(wrapped_plain_words) is None
+    assert parse_single_staged_molecule(wrapped_malformed_selfies) is None
+    assert parse_staged_target(text) == []
+
+
+def test_parse_staged_target_rejects_valid_stage_with_unwrapped_suffix() -> None:
+    text = "<bom>[C][O]<eom> trailing_text"
+
+    assert parse_single_staged_molecule(text) is None
+    assert parse_staged_target(text) == []

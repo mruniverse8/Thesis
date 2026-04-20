@@ -7,6 +7,7 @@ import torch
 from torch import nn
 from transformers import T5ForConditionalGeneration
 
+from post_training.shared.decoding import StageTokenConstraints
 from src.checkpoint_bootstrap import archive_checkpoint_directory
 from src.io_utils import ensure_dir, write_json
 from src.tokenizer_utils import assert_tokenizer_matches_model_vocab
@@ -85,6 +86,7 @@ class PolicyValueModel(nn.Module):
         super().__init__()
         self.policy_model = policy_model
         self.value_head = value_head or ScalarValueHead(policy_model.config.d_model)
+        self._stage_token_constraints: StageTokenConstraints | None = None
 
     @classmethod
     def from_pretrained(
@@ -123,6 +125,15 @@ class PolicyValueModel(nn.Module):
 
     def generate(self, *args: Any, **kwargs: Any):
         return self.policy_model.generate(*args, **kwargs)
+
+    def set_stage_token_constraints(
+        self,
+        stage_token_constraints: StageTokenConstraints | None,
+    ) -> None:
+        self._stage_token_constraints = stage_token_constraints
+
+    def get_stage_token_constraints(self) -> StageTokenConstraints | None:
+        return self._stage_token_constraints
 
     def compute_values(
         self,
