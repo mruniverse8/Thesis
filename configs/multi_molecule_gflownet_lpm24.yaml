@@ -1,0 +1,67 @@
+seed: 42
+
+tracking:
+  enabled: true
+  backend: wandb
+  project: Thesis-2
+  workspace: koala-team
+  run_name:
+  tags: ["lpm24"]
+
+model:
+  checkpoint: outputs/multi_molecule_sft_lpm24/checkpoints/best
+  use_lora: true
+  lora_rank: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules: ["q", "v"]
+
+data:
+  train_file: data/lpm24/grouped_splits/train_multimol.jsonl
+  validation_file: data/lpm24/grouped_splits/validation_multimol.jsonl
+  test_file: data/lpm24/grouped_splits/test_multimol.jsonl
+  max_source_length: 512
+
+training:
+  output_dir: outputs/multi_molecule_gflownet_lpm24
+  device: auto
+  save_every_iterations: 5
+
+reward:
+  fingerprint_radius: 2
+  fingerprint_num_bits: 2048
+  match_alpha: 0.5
+  diversity_beta: 1.0
+  match_weight: 1.0
+  diversity_weight: 1.0
+  reward_amplification: 8.0
+  acceptance_dice_threshold: 0.7
+  acceptance_tanimoto_threshold: 0.6
+
+gflownet:
+  gflownet_iterations: 10
+  batch_size: 2
+  objective: tb
+  learning_rate: 5.0e-5
+  max_grad_norm: 1.0
+  diagnostic_log_every_iterations: 5
+  trajectory_preview_every_iterations: 5
+  trajectory_preview_num_samples: 3
+  trajectory_preview_max_chars: 480
+  invalid_terminal_reward: 1.0e-4
+  replay:
+    capacity: 0
+    replay_batch_size: 0
+    max_total_action_tokens: 50000
+    with_replacement: false
+  rollout:
+    max_source_length: 512
+    max_stage_new_tokens: 192
+    max_molecules_per_sequence: 8
+    max_sequence_length: 4096
+    temperature: 0.08
+    top_p: 0.25
+    constrained_decoding: true
+    stage_separator: " "
+    selfies_dict_path: molecules/dict/selfies_dict.txt
+    terminate_on_invalid_stage: true

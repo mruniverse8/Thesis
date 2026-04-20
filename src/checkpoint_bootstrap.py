@@ -163,3 +163,41 @@ def build_ppo_checkpoint_prep_command(
         ],
         str(extract_dir),
     )
+
+
+def build_gflownet_checkpoint_prep_command(
+    *,
+    repo_dir: str | Path,
+    config_path: str | Path,
+    checkpoint_download_source: str | None = None,
+) -> tuple[str, list[str] | None, str | None]:
+    repo_root = Path(repo_dir).expanduser().resolve()
+    resolved_config_path = resolve_path(config_path, repo_root)
+    config = load_yaml(resolved_config_path)
+    checkpoint_value = config.get("model", {}).get("checkpoint")
+    if not checkpoint_value:
+        return "missing_config_checkpoint", None, None
+    if looks_like_remote_model_identifier(checkpoint_value):
+        return "remote_model", None, str(checkpoint_value)
+
+    extract_dir = resolve_path(checkpoint_value, repo_root)
+    if checkpoint_artifact_is_ready(extract_dir):
+        return "existing_local_checkpoint", None, str(extract_dir)
+    if not str(checkpoint_download_source or "").strip():
+        return "missing_download_source", None, str(extract_dir)
+
+    return (
+        "managed_download",
+        [
+            sys.executable,
+            str(repo_root / "scripts" / "download_ppo_checkpoint.py"),
+            "--download-source",
+            str(checkpoint_download_source).strip(),
+            "--zip-path",
+            str(default_checkpoint_archive_path(extract_dir)),
+            "--extract-dir",
+            str(extract_dir),
+            "--skip-existing",
+        ],
+        str(extract_dir),
+    )

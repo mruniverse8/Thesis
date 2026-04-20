@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from io import BytesIO
 from pathlib import Path
 from zipfile import ZipFile
+
+import pytest
 
 from colab.thesis_colab_support import get_bootstrap_environment as get_colab_environment
 from kaggle.thesis_kaggle_support import get_bootstrap_environment as get_kaggle_environment
 from src.checkpoint_bootstrap import (
     archive_checkpoint_directory,
+    build_gflownet_checkpoint_prep_command,
     build_ppo_checkpoint_prep_command,
     checkpoint_artifact_is_ready,
     extract_checkpoint_archive,
@@ -26,6 +30,16 @@ from src.runtime_bootstrap import (
 def _write_text(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+def _load_script_module(relative_path: Path):
+    project_root = Path(__file__).resolve().parents[1]
+    script_path = project_root / relative_path
+    spec = importlib.util.spec_from_file_location(relative_path.stem, script_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _make_repo(tmp_path: Path) -> Path:
@@ -101,6 +115,8 @@ def test_new_bootstrap_scripts_import_cleanly() -> None:
         Path("scripts") / "train_multi_molecule_gflownet.py",
     ):
         script_path = project_root / relative_path
+        if relative_path.name == "train_multi_molecule_gflownet.py":
+            pytest.importorskip("transformers")
         spec = importlib.util.spec_from_file_location(relative_path.stem, script_path)
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
@@ -113,6 +129,14 @@ def test_resolve_stage_config_path_uses_stage_default(tmp_path: Path) -> None:
     resolved = resolve_stage_config_path(repo_dir, STAGE_SPECS["multi_sft"])
 
     assert resolved == (repo_dir / "configs" / "multi_molecule_sft_mini.yaml").resolve()
+
+
+def test_resolve_stage_config_path_uses_gflownet_stage_default(tmp_path: Path) -> None:
+    repo_dir = _make_repo(tmp_path)
+
+    resolved = resolve_stage_config_path(repo_dir, STAGE_SPECS["gflownet"])
+
+    assert resolved == (repo_dir / "configs" / "multi_molecule_gflownet_mini.yaml").resolve()
 
 
 def test_stage_specs_use_expected_training_scripts() -> None:
@@ -187,6 +211,199 @@ def test_build_dataset_prep_command_builds_google_drive_download_when_needed(tmp
     assert "--skip-existing" in command
 
 
+def test_build_dataset_prep_command_builds_google_drive_download_for_gflownet_when_needed(
+    tmp_path: Path,
+) -> None:
+    repo_dir = _make_repo(tmp_path)
+
+    dataset_kind, command = build_dataset_prep_command(
+        repo_dir=repo_dir,
+        stage_spec=STAGE_SPECS["gflownet"],
+        config_path=repo_dir / "configs" / "multi_molecule_gflownet_mini.yaml",
+        dataset_mode="auto",
+        train_dataset_file_id="gflownet-id",
+    )
+
+    assert dataset_kind == "mini_post_training"
+    assert command is not None
+    assert command[1].endswith("scripts/download_train_dataset.py")
+    assert "--file-id" in command
+    assert "gflownet-id" in command
+    assert "--skip-existing" in command
+
+
+def test_colab_bootstrap_scripts_prepare_gflownet_reports_missing_checkpoint_download_source(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_script_module(Path("scripts") / "init_colab.py")
+    repo_dir = _make_repo(tmp_path)
+    config_path = repo_dir / "configs" / "multi_molecule_gflownet_mini.yaml"
+    checkpoint_target = repo_dir / "outputs" / "multi_molecule_sft_mini" / "checkpoints" / "best"
+    events: list[tuple[str, dict[str, object]]] = []
+    commands: list[tuple[list[str], Path | None]] = []
+    builder_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(module, "get_bootstrap_environment", lambda _repo_dir: object())
+    monkeypatch.setattr(module, "summarize_environment", lambda _environment: {"environment": "test"})
+    monkeypatch.setattr(module, "json_dumps", lambda payload: str(payload))
+    monkeypatch.setattr(module, "clone_or_update_repo", lambda **_kwargs: repo_dir)
+    monkeypatch.setattr(module, "install_repo_requirements", lambda _repo_dir: None)
+    monkeypatch.setattr(module, "resolve_stage_config_path", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(
+        module,
+        "build_dataset_prep_command",
+        lambda **_kwargs: (
+            "mini_post_training",
+            [sys.executable, str(repo_dir / "scripts" / "download_train_dataset.py"), "--skip-existing"],
+        ),
+    )
+    monkeypatch.setattr(module, "build_ppo_checkpoint_prep_command", lambda **_kwargs: ("not_applicable", None, None))
+
+    def _fake_builder(**kwargs):
+        builder_calls.append(kwargs)
+        return ("missing_download_source", None, str(checkpoint_target))
+
+    monkeypatch.setattr(module, "build_gflownet_checkpoint_prep_command", _fake_builder)
+    monkeypatch.setattr(
+        module,
+        "run_command",
+        lambda command, *, cwd=None, env=None: commands.append((list(command), Path(cwd) if cwd else None)),
+    )
+    monkeypatch.setattr(
+        module,
+        "print_json_status",
+        lambda event, **payload: events.append((event, payload)),
+    )
+    monkeypatch.setattr(module.sys, "argv", ["init_colab.py", "--stage", "gflownet", "--repo-dir", str(repo_dir)])
+
+    module.main()
+
+    assert builder_calls == [
+        {
+            "repo_dir": repo_dir,
+            "config_path": config_path,
+            "checkpoint_download_source": None,
+        }
+    ]
+    assert commands == [
+        (
+            [
+                sys.executable,
+                str(repo_dir / "scripts" / "download_train_dataset.py"),
+                "--skip-existing",
+            ],
+            repo_dir,
+        )
+    ]
+    assert any(
+        event == "checkpoint_plan"
+        and payload["stage"] == "gflownet"
+        and payload["checkpoint_kind"] == "missing_download_source"
+        and payload["checkpoint_target"] == str(checkpoint_target)
+        and payload["checkpoint_download_source_provided"] is False
+        for event, payload in events
+    )
+
+
+def test_colab_bootstrap_scripts_prepare_gflownet_builds_managed_checkpoint_download(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    module = _load_script_module(Path("scripts") / "init_colab.py")
+    repo_dir = _make_repo(tmp_path)
+    config_path = repo_dir / "configs" / "multi_molecule_gflownet_mini.yaml"
+    checkpoint_target = repo_dir / "outputs" / "multi_molecule_sft_mini" / "checkpoints" / "best"
+    checkpoint_command = [
+        sys.executable,
+        str(repo_dir / "scripts" / "download_ppo_checkpoint.py"),
+        "--download-source",
+        "drive-id-12345",
+        "--zip-path",
+        str(checkpoint_target.with_suffix(".zip")),
+        "--extract-dir",
+        str(checkpoint_target),
+        "--skip-existing",
+    ]
+    events: list[tuple[str, dict[str, object]]] = []
+    commands: list[tuple[list[str], Path | None]] = []
+    builder_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(module, "get_bootstrap_environment", lambda _repo_dir: object())
+    monkeypatch.setattr(module, "summarize_environment", lambda _environment: {"environment": "test"})
+    monkeypatch.setattr(module, "json_dumps", lambda payload: str(payload))
+    monkeypatch.setattr(module, "clone_or_update_repo", lambda **_kwargs: repo_dir)
+    monkeypatch.setattr(module, "install_repo_requirements", lambda _repo_dir: None)
+    monkeypatch.setattr(module, "resolve_stage_config_path", lambda *_args, **_kwargs: config_path)
+    monkeypatch.setattr(
+        module,
+        "build_dataset_prep_command",
+        lambda **_kwargs: (
+            "mini_post_training",
+            [sys.executable, str(repo_dir / "scripts" / "download_train_dataset.py"), "--skip-existing"],
+        ),
+    )
+    monkeypatch.setattr(module, "build_ppo_checkpoint_prep_command", lambda **_kwargs: ("not_applicable", None, None))
+
+    def _fake_builder(**kwargs):
+        builder_calls.append(kwargs)
+        return ("managed_download", checkpoint_command, str(checkpoint_target))
+
+    monkeypatch.setattr(module, "build_gflownet_checkpoint_prep_command", _fake_builder)
+    monkeypatch.setattr(
+        module,
+        "run_command",
+        lambda command, *, cwd=None, env=None: commands.append((list(command), Path(cwd) if cwd else None)),
+    )
+    monkeypatch.setattr(
+        module,
+        "print_json_status",
+        lambda event, **payload: events.append((event, payload)),
+    )
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            "init_colab.py",
+            "--stage",
+            "gflownet",
+            "--repo-dir",
+            str(repo_dir),
+            "--gflownet-checkpoint-download-source",
+            "drive-id-12345",
+        ],
+    )
+
+    module.main()
+
+    assert builder_calls == [
+        {
+            "repo_dir": repo_dir,
+            "config_path": config_path,
+            "checkpoint_download_source": "drive-id-12345",
+        }
+    ]
+    assert commands == [
+        (
+            [
+                sys.executable,
+                str(repo_dir / "scripts" / "download_train_dataset.py"),
+                "--skip-existing",
+            ],
+            repo_dir,
+        ),
+        (checkpoint_command, repo_dir),
+    ]
+    assert any(
+        event == "checkpoint_plan"
+        and payload["stage"] == "gflownet"
+        and payload["checkpoint_kind"] == "managed_download"
+        and payload["checkpoint_target"] == str(checkpoint_target)
+        and payload["checkpoint_download_source_provided"] is True
+        for event, payload in events
+    )
+
+
 def test_build_dataset_prep_command_builds_chebi_download_for_sft(tmp_path: Path) -> None:
     repo_dir = _make_repo(tmp_path)
 
@@ -233,6 +450,38 @@ def test_build_ppo_checkpoint_prep_command_builds_download_when_needed(tmp_path:
     checkpoint_kind, command, checkpoint_target = build_ppo_checkpoint_prep_command(
         repo_dir=repo_dir,
         config_path=repo_dir / "configs" / "molecule_wise_ppo_mini.yaml",
+        checkpoint_download_source="drive-id-12345",
+    )
+
+    assert checkpoint_kind == "managed_download"
+    assert checkpoint_target is not None and checkpoint_target.endswith("outputs/multi_molecule_sft_mini/checkpoints/best")
+    assert command is not None
+    assert command[1].endswith("scripts/download_ppo_checkpoint.py")
+    assert "--download-source" in command
+    assert "drive-id-12345" in command
+    assert "--skip-existing" in command
+
+
+def test_build_gflownet_checkpoint_prep_command_skips_when_source_missing(tmp_path: Path) -> None:
+    repo_dir = _make_repo(tmp_path)
+
+    checkpoint_kind, command, checkpoint_target = build_gflownet_checkpoint_prep_command(
+        repo_dir=repo_dir,
+        config_path=repo_dir / "configs" / "multi_molecule_gflownet_mini.yaml",
+        checkpoint_download_source=None,
+    )
+
+    assert checkpoint_kind == "missing_download_source"
+    assert command is None
+    assert checkpoint_target is not None and checkpoint_target.endswith("outputs/multi_molecule_sft_mini/checkpoints/best")
+
+
+def test_build_gflownet_checkpoint_prep_command_builds_download_when_needed(tmp_path: Path) -> None:
+    repo_dir = _make_repo(tmp_path)
+
+    checkpoint_kind, command, checkpoint_target = build_gflownet_checkpoint_prep_command(
+        repo_dir=repo_dir,
+        config_path=repo_dir / "configs" / "multi_molecule_gflownet_mini.yaml",
         checkpoint_download_source="drive-id-12345",
     )
 
