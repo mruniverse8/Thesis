@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 import random
 from time import perf_counter
 from typing import Any, Sequence
@@ -27,6 +28,7 @@ from .checkpointing import (
     append_iteration_diagnostics,
     append_trajectory_previews,
     prepare_gflownet_output_dir,
+    save_gflownet_checkpoint_artifacts,
     save_gflownet_iteration_artifacts,
     write_gflownet_history,
 )
@@ -104,6 +106,10 @@ class MultiMoleculeGFlowNetTrainer:
             else None
         )
         self.replay_rng = random.Random(0)
+        self.best_objective_loss: float | None = None
+        self.best_checkpoint_iteration: int | None = None
+        self.best_checkpoint_dir: str | None = None
+        self.best_checkpoint_zip: str | None = None
 
     def collect_on_policy_trajectories(
         self,
@@ -448,6 +454,11 @@ class MultiMoleculeGFlowNetTrainer:
                 metrics=metrics,
                 trajectories=on_policy_trajectories,
             )
+        self.save_best_checkpoint(
+            iteration_index=iteration_index,
+            metrics=metrics,
+            trajectories=on_policy_trajectories,
+        )
 
         return GFlowNetTrainIterationResult(
             metrics=metrics,
@@ -472,6 +483,39 @@ class MultiMoleculeGFlowNetTrainer:
             trajectories=trajectories,
             create_archive=iteration_index == self.config.gflownet_iterations,
         )
+
+    def save_best_checkpoint(
+        self,
+        *,
+        iteration_index: int,
+        metrics: dict[str, Any],
+        trajectories: Sequence[SampledStageTrajectory],
+    ) -> Path | None:
+        objective_loss = metrics.get("objective_loss")
+        if objective_loss is None:
+            return None
+
+        objective_loss_value = float(objective_loss)
+        if (
+            self.best_objective_loss is not None
+            and objective_loss_value >= self.best_objective_loss
+        ):
+            return None
+
+        checkpoint_dir, checkpoint_zip = save_gflownet_checkpoint_artifacts(
+            checkpoint_dir=Path(self.config.output_dir) / "checkpoints" / "best",
+            model=self.model,
+            tokenizer=self.tokenizer,
+            config=self.config.to_dict(),
+            metrics=metrics,
+            trajectories=trajectories,
+            create_archive=True,
+        )
+        self.best_objective_loss = objective_loss_value
+        self.best_checkpoint_iteration = iteration_index
+        self.best_checkpoint_dir = str(checkpoint_dir)
+        self.best_checkpoint_zip = str(checkpoint_zip) if checkpoint_zip is not None else None
+        return checkpoint_dir
 
 
 def sample_examples(dataset: MultiMoleculeDataset, count: int) -> list[dict[str, object]]:
@@ -498,6 +542,10 @@ def _build_gflownet_tracking_summary(summary: dict[str, object]) -> dict[str, ob
         "output_dir": summary["output_dir"],
         "num_iterations": summary["num_iterations"],
     }
+    if summary.get("best_objective_loss") is not None:
+        tracking_summary["best_objective_loss"] = summary["best_objective_loss"]
+    if summary.get("best_checkpoint_iteration") is not None:
+        tracking_summary["best_checkpoint_iteration"] = summary["best_checkpoint_iteration"]
     for key in (
         "mean_stage_reward",
         "valid_fraction",
@@ -642,6 +690,10 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
             "history": history,
             "resolved_checkpoint_source": resolved_checkpoint_path_or_id,
             "resolved_checkpoint_path_or_id": resolved_checkpoint_path_or_id,
+            "best_objective_loss": getattr(trainer, "best_objective_loss", None),
+            "best_checkpoint_iteration": getattr(trainer, "best_checkpoint_iteration", None),
+            "best_checkpoint_dir": getattr(trainer, "best_checkpoint_dir", None),
+            "best_checkpoint_zip": getattr(trainer, "best_checkpoint_zip", None),
         }
         write_json(output_dir / "run_summary.json", summary)
         tracker.log_summary(_build_gflownet_tracking_summary(summary), prefix="gflownet")

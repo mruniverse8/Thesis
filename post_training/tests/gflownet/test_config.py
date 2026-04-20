@@ -102,6 +102,8 @@ def test_multi_molecule_gflownet_mini_config_parses_for_tb_db_and_subtb() -> Non
 
     tb_config = build_gflownet_config(payload)
     assert tb_config.objective == "tb"
+    assert tb_config.rollout.temperature == 0.08
+    assert tb_config.rollout.top_p == 0.25
     assert tb_config.diagnostic_log_every_iterations == 5
     assert tb_config.trajectory_preview_every_iterations == 5
     assert tb_config.trajectory_preview_num_samples == 3
@@ -114,6 +116,16 @@ def test_multi_molecule_gflownet_mini_config_parses_for_tb_db_and_subtb() -> Non
     payload["gflownet"]["objective"] = "subtb"
     subtb_config = build_gflownet_config(payload)
     assert subtb_config.objective == "subtb"
+
+
+def test_multi_molecule_gflownet_full_config_uses_conservative_rollout_defaults() -> None:
+    config_path = Path(__file__).resolve().parents[3] / "configs" / "multi_molecule_gflownet.yaml"
+    payload = load_yaml(config_path)
+
+    config = build_gflownet_config(payload)
+
+    assert config.rollout.temperature == 0.08
+    assert config.rollout.top_p == 0.25
 
 
 def test_resolve_gflownet_config_paths_falls_back_to_original_weights_for_missing_checkpoint(

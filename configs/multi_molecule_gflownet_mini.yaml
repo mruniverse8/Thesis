@@ -59,8 +59,8 @@ gflownet:
     max_stage_new_tokens: 128
     max_molecules_per_sequence: 8
     max_sequence_length: 2560
-    temperature: 0.8
-    top_p: 0.95
+    temperature: 0.08
+    top_p: 0.25
     constrained_decoding: true
     selfies_dict_path: molecules/dict/selfies_dict.txt
     terminate_on_invalid_stage: true

@@ -1,6 +1,7 @@
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from zipfile import ZipFile
 
 import torch
 
@@ -138,6 +139,87 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     }
 
 
+def test_save_best_checkpoint_tracks_lowest_objective_loss_and_writes_zip(
+    tmp_path: Path,
+) -> None:
+    class DummyTokenizer:
+        def save_pretrained(self, output_dir: str | Path) -> None:
+            path = Path(output_dir)
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "tokenizer_config.json").write_text("{}", encoding="utf-8")
+            (path / "spiece.model").write_text("spiece", encoding="utf-8")
+
+    class DummyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+            self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+
+        def save_checkpoint(
+            self,
+            output_dir: str | Path,
+            *,
+            tokenizer=None,
+            config=None,
+            metrics=None,
+            create_archive: bool = False,
+        ) -> None:
+            del create_archive
+            path = Path(output_dir)
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "model.bin").write_text("weights", encoding="utf-8")
+            if tokenizer is not None:
+                tokenizer.save_pretrained(path)
+            if config is not None:
+                (path / "training_config.json").write_text(
+                    json.dumps(config),
+                    encoding="utf-8",
+                )
+            if metrics is not None:
+                (path / "metrics.json").write_text(json.dumps(metrics), encoding="utf-8")
+
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=DummyModel(),
+        tokenizer=DummyTokenizer(),
+        config=GFlowNetConfig(output_dir=str(tmp_path / "outputs"), save_every_iterations=99),
+        device=torch.device("cpu"),
+    )
+    trajectories = [_make_sampled_trajectory(rollout_id="best-1", terminal_reward=2.0)]
+
+    checkpoint_dir = trainer.save_best_checkpoint(
+        iteration_index=1,
+        metrics={"objective_loss": 1.25},
+        trajectories=trajectories,
+    )
+
+    assert checkpoint_dir == tmp_path / "outputs" / "checkpoints" / "best"
+    assert trainer.best_objective_loss == 1.25
+    assert trainer.best_checkpoint_iteration == 1
+    assert trainer.best_checkpoint_dir == str(checkpoint_dir)
+    assert trainer.best_checkpoint_zip == str(checkpoint_dir.with_suffix(".zip"))
+    assert json.loads((checkpoint_dir / "iteration_metrics.json").read_text())["objective_loss"] == 1.25
+    with ZipFile(checkpoint_dir.with_suffix(".zip")) as archive:
+        assert "best/iteration_metrics.json" in archive.namelist()
+
+    unchanged = trainer.save_best_checkpoint(
+        iteration_index=2,
+        metrics={"objective_loss": 1.25},
+        trajectories=trajectories,
+    )
+    assert unchanged is None
+    assert trainer.best_checkpoint_iteration == 1
+
+    updated = trainer.save_best_checkpoint(
+        iteration_index=3,
+        metrics={"objective_loss": 1.0},
+        trajectories=trajectories,
+    )
+    assert updated == checkpoint_dir
+    assert trainer.best_objective_loss == 1.0
+    assert trainer.best_checkpoint_iteration == 3
+    assert json.loads((checkpoint_dir / "iteration_metrics.json").read_text())["objective_loss"] == 1.0
+
+
 def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_model_loads(
     monkeypatch,
     tmp_path: Path,
@@ -177,9 +259,17 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
     class DummyTrainer:
         def __init__(self, **kwargs) -> None:
             self.kwargs = kwargs
+            self.best_objective_loss = None
+            self.best_checkpoint_iteration = None
+            self.best_checkpoint_dir = None
+            self.best_checkpoint_zip = None
 
         def train_iteration(self, examples, *, iteration_index: int) -> GFlowNetTrainIterationResult:
             del examples
+            self.best_objective_loss = 1.25
+            self.best_checkpoint_iteration = iteration_index
+            self.best_checkpoint_dir = str(output_dir / "checkpoints" / "best")
+            self.best_checkpoint_zip = str(output_dir / "checkpoints" / "best.zip")
             return GFlowNetTrainIterationResult(
                 metrics={
                     "iteration": float(iteration_index),
@@ -306,6 +396,10 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
     captured = capsys.readouterr()
 
     assert summary["resolved_checkpoint_source"] == DEFAULT_PPO_FALLBACK_CHECKPOINT
+    assert summary["best_objective_loss"] == 1.25
+    assert summary["best_checkpoint_iteration"] == 1
+    assert summary["best_checkpoint_dir"] == str(output_dir / "checkpoints" / "best")
+    assert summary["best_checkpoint_zip"] == str(output_dir / "checkpoints" / "best.zip")
     assert "[gflownet][iteration 1] trajectory preview" in captured.out
     assert "preview-text" in captured.out
     assert load_calls == [

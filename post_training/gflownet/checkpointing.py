@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any, Sequence
 
+from src.checkpoint_bootstrap import archive_checkpoint_directory
 from src.io_utils import ensure_dir, write_json, write_jsonl
 
 from post_training.shared.io import initialize_run_output, write_history_json
@@ -55,6 +56,35 @@ def append_trajectory_previews(
     return diagnostics_path
 
 
+def save_gflownet_checkpoint_artifacts(
+    *,
+    checkpoint_dir: str | Path,
+    model,
+    tokenizer,
+    config: dict[str, Any],
+    metrics: dict[str, Any],
+    trajectories: Sequence,
+    create_archive: bool = False,
+) -> tuple[Path, Path | None]:
+    resolved_checkpoint_dir = Path(checkpoint_dir)
+    model.save_checkpoint(
+        resolved_checkpoint_dir,
+        tokenizer=tokenizer,
+        config=config,
+        metrics=metrics,
+        create_archive=False,
+    )
+    write_jsonl(
+        resolved_checkpoint_dir / "sampled_trajectories.jsonl",
+        [trajectory.to_dict() for trajectory in trajectories],
+    )
+    write_json(resolved_checkpoint_dir / "iteration_metrics.json", metrics)
+    archive_path = (
+        archive_checkpoint_directory(resolved_checkpoint_dir) if create_archive else None
+    )
+    return resolved_checkpoint_dir, archive_path
+
+
 def save_gflownet_iteration_artifacts(
     *,
     output_dir: str | Path,
@@ -66,17 +96,13 @@ def save_gflownet_iteration_artifacts(
     trajectories: Sequence,
     create_archive: bool = False,
 ) -> Path:
-    checkpoint_dir = Path(output_dir) / "checkpoints" / f"iteration-{iteration_index:04d}"
-    model.save_checkpoint(
-        checkpoint_dir,
+    checkpoint_dir, _archive_path = save_gflownet_checkpoint_artifacts(
+        checkpoint_dir=Path(output_dir) / "checkpoints" / f"iteration-{iteration_index:04d}",
+        model=model,
         tokenizer=tokenizer,
         config=config,
         metrics=metrics,
+        trajectories=trajectories,
         create_archive=create_archive,
     )
-    write_jsonl(
-        checkpoint_dir / "sampled_trajectories.jsonl",
-        [trajectory.to_dict() for trajectory in trajectories],
-    )
-    write_json(checkpoint_dir / "iteration_metrics.json", metrics)
     return checkpoint_dir
