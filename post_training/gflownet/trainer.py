@@ -589,6 +589,15 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
                     output_dir,
                     iteration_result.trajectory_preview["records"],
                 )
+                print(
+                    "\n".join(
+                        [
+                            f"[gflownet][iteration {iteration}] trajectory preview",
+                            iteration_result.trajectory_preview["tracker_text"],
+                        ]
+                    ),
+                    flush=True,
+                )
                 tracker.log_summary(
                     {
                         "latest_trajectory_preview": iteration_result.trajectory_preview[
