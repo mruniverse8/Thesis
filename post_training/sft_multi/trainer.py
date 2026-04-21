@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 import json
 import math
 from pathlib import Path
@@ -80,6 +81,31 @@ def _build_sft_tracking_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _build_sft_step_metrics(
+    *,
+    epoch: int,
+    global_step: int,
+    train_loss: float,
+    learning_rate: float,
+) -> dict[str, float | int]:
+    return {
+        "epoch": epoch,
+        "global_step": global_step,
+        "train_loss_step": train_loss,
+        "learning_rate": learning_rate,
+    }
+
+
+def _build_sft_epoch_tracking_metrics(epoch_metrics: Mapping[str, Any]) -> dict[str, float | int]:
+    return {
+        "epoch": int(epoch_metrics["epoch"]),
+        "global_step": int(epoch_metrics["global_step"]),
+        "train_loss_epoch": float(epoch_metrics["train_loss"]),
+        "validation_loss": float(epoch_metrics["validation_loss"]),
+        "learning_rate": float(epoch_metrics["learning_rate"]),
+    }
+
+
 def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
     model_config = config["model"]
     data_config = config["data"]
@@ -148,6 +174,7 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
     history: list[dict[str, Any]] = []
     best_validation_loss = float("inf")
     global_step = 0
+    log_every = max(1, int(training_config["log_every"]))
 
     try:
         tracker = build_tracker(
@@ -163,6 +190,8 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
 
             train_loss_sum = 0.0
             train_examples = 0
+            step_loss_sum = 0.0
+            step_examples = 0
 
             progress_bar = tqdm(train_loader, desc=f"Epoch {epoch}", leave=False)
             for batch_index, batch in enumerate(progress_bar, start=1):
@@ -181,6 +210,8 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
 
                 train_loss_sum += raw_loss.item() * batch_size
                 train_examples += batch_size
+                step_loss_sum += raw_loss.item() * batch_size
+                step_examples += batch_size
 
                 should_step = (
                     batch_index % gradient_accumulation_steps == 0
@@ -203,12 +234,37 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
                 optimizer.zero_grad(set_to_none=True)
                 global_step += 1
 
-                if global_step % int(training_config["log_every"]) == 0:
-                    average_train_loss = train_loss_sum / max(train_examples, 1)
+                if global_step % log_every == 0:
+                    step_train_loss = step_loss_sum / max(step_examples, 1)
+                    learning_rate = scheduler.get_last_lr()[0]
                     progress_bar.set_postfix(
-                        train_loss=f"{average_train_loss:.4f}",
-                        lr=f"{scheduler.get_last_lr()[0]:.2e}",
+                        train_loss=f"{step_train_loss:.4f}",
+                        lr=f"{learning_rate:.2e}",
                     )
+                    tracker.log_metrics(
+                        _build_sft_step_metrics(
+                            epoch=epoch,
+                            global_step=global_step,
+                            train_loss=step_train_loss,
+                            learning_rate=learning_rate,
+                        ),
+                        step=global_step,
+                        prefix="sft",
+                    )
+                    step_loss_sum = 0.0
+                    step_examples = 0
+
+            if step_examples > 0:
+                tracker.log_metrics(
+                    _build_sft_step_metrics(
+                        epoch=epoch,
+                        global_step=global_step,
+                        train_loss=step_loss_sum / max(step_examples, 1),
+                        learning_rate=scheduler.get_last_lr()[0],
+                    ),
+                    step=global_step,
+                    prefix="sft",
+                )
 
             average_train_loss = train_loss_sum / max(train_examples, 1)
             validation_loss = evaluate_loss(model, validation_loader, device, mixed_precision)
@@ -222,7 +278,11 @@ def run_multi_molecule_sft(config: dict[str, Any]) -> dict[str, Any]:
             }
             history.append(epoch_metrics)
             write_sft_history(output_dir, history)
-            tracker.log_metrics(epoch_metrics, step=global_step, prefix="sft")
+            tracker.log_metrics(
+                _build_sft_epoch_tracking_metrics(epoch_metrics),
+                step=global_step,
+                prefix="sft",
+            )
 
             save_sft_checkpoint(
                 checkpoint_dir=output_dir / "checkpoints" / "last",
