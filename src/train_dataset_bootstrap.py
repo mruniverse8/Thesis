@@ -3,7 +3,10 @@ from __future__ import annotations
 import re
 import shutil
 import zipfile
+from html import unescape
+from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 
@@ -63,6 +66,59 @@ def _extract_confirm_token(response: requests.Response) -> str | None:
     return match.group(1)
 
 
+class _GoogleDriveConfirmFormParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.form_action: str | None = None
+        self.form_inputs: dict[str, str] = {}
+        self._inside_target_form = False
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {name: value for name, value in attrs}
+        if tag == "form" and self.form_action is None:
+            action = attributes.get("action")
+            if action:
+                self.form_action = action
+                self.form_inputs = {}
+                self._inside_target_form = True
+            return
+
+        if tag != "input" or not self._inside_target_form:
+            return
+
+        name = attributes.get("name")
+        value = attributes.get("value")
+        if name is None or value is None:
+            return
+        self.form_inputs[name] = value
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "form" and self._inside_target_form:
+            self._inside_target_form = False
+
+
+def _extract_confirm_form(response: requests.Response) -> tuple[str, dict[str, str]] | None:
+    content_type = (response.headers.get("content-type") or "").lower()
+    if "text/html" not in content_type:
+        return None
+
+    try:
+        text = response.text
+    except Exception:
+        return None
+
+    parser = _GoogleDriveConfirmFormParser()
+    parser.feed(text)
+
+    if parser.form_action is None:
+        return None
+    if parser.form_inputs.get("confirm") != "t":
+        return None
+
+    response_url = getattr(response, "url", GOOGLE_DRIVE_DOWNLOAD_URL)
+    return urljoin(response_url, unescape(parser.form_action)), parser.form_inputs
+
+
 def _write_response_content(response: requests.Response, destination_path: Path) -> None:
     ensure_dir(destination_path.parent)
     with destination_path.open("wb") as handle:
@@ -101,6 +157,18 @@ def download_google_drive_zip(
                 timeout=120,
             )
             response.raise_for_status()
+        else:
+            confirm_form = _extract_confirm_form(response)
+            if confirm_form is not None:
+                confirm_url, confirm_params = confirm_form
+                response.close()
+                response = active_session.get(
+                    confirm_url,
+                    params=confirm_params,
+                    stream=True,
+                    timeout=120,
+                )
+                response.raise_for_status()
 
         _write_response_content(response, target_path)
     finally:
