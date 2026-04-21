@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-from collections import defaultdict
 from dataclasses import dataclass
 import json
 import random
@@ -24,6 +23,7 @@ from post_training.shared.decoding import (
 from post_training.sft_multi.dataset import MultiMoleculeDataset
 
 from .checkpointing import (
+    append_iteration_diagnostics,
     append_optimizer_step_metrics,
     append_trajectory_previews,
     prepare_ppo_output_dir,
@@ -31,6 +31,13 @@ from .checkpointing import (
     write_ppo_history,
 )
 from .config import PPOConfig, StageTrajectory, build_ppo_config
+from .diagnostics import (
+    build_trajectory_preview_payload,
+    rollout_stage_metrics,
+    termination_reason_metrics,
+    tracker_diagnostic_metrics,
+    tracker_headline_metrics,
+)
 from .model import (
     PolicyValueModel,
     assert_checkpoint_tokenizer_matches_model,
@@ -63,23 +70,6 @@ def _tensor_std(values: torch.Tensor) -> float:
     return float(values.std(unbiased=False).item())
 
 
-def _mean_bool(values: Sequence[bool]) -> float:
-    if not values:
-        return 0.0
-    return sum(int(value) for value in values) / len(values)
-
-
-def _truncate_text(text: str, *, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return text[: max_chars - 3] + "..."
-
-
-def _render_sequence(values: Sequence[str | None], *, max_chars: int) -> str:
-    rendered = " | ".join(value or "<none>" for value in values)
-    return _truncate_text(rendered, max_chars=max_chars)
-
-
 def _all_finite(*tensors: torch.Tensor) -> bool:
     return all(bool(torch.isfinite(tensor).all().item()) for tensor in tensors)
 
@@ -88,123 +78,8 @@ def _all_finite(*tensors: torch.Tensor) -> bool:
 class PPOTrainIterationResult:
     metrics: dict[str, float]
     optimizer_step_metrics: list[dict[str, Any]]
+    diagnostic_metrics: dict[str, Any] | None = None
     trajectory_preview: dict[str, Any] | None = None
-
-
-def build_trajectory_preview_payload(
-    trajectories: Sequence[StageTrajectory],
-    *,
-    iteration_index: int,
-    num_samples: int,
-    max_chars: int,
-) -> dict[str, Any] | None:
-    if not trajectories:
-        return None
-
-    grouped_trajectories: dict[str, list[StageTrajectory]] = defaultdict(list)
-    for trajectory in trajectories:
-        grouped_trajectories[trajectory.rollout_id].append(trajectory)
-
-    preview_candidates: list[dict[str, Any]] = []
-    for rollout in grouped_trajectories.values():
-        ordered_rollout = sorted(rollout, key=lambda trajectory: trajectory.stage_index)
-        stage_rewards = [float(trajectory.reward) for trajectory in ordered_rollout]
-        preview_candidates.append(
-            {
-                "iteration": iteration_index,
-                "rollout_id": ordered_rollout[0].rollout_id,
-                "example_id": ordered_rollout[0].example_id,
-                "total_reward": float(sum(stage_rewards)),
-                "stage_rewards": stage_rewards,
-                "generated_selfies_sequence": [
-                    trajectory.sampled_selfies for trajectory in ordered_rollout
-                ],
-                "raw_stage_text_sequence": [
-                    str(trajectory.stage_text) for trajectory in ordered_rollout
-                ],
-                "valid_sequence": [bool(trajectory.is_valid) for trajectory in ordered_rollout],
-                "duplicate_sequence": [
-                    bool(trajectory.is_duplicate) for trajectory in ordered_rollout
-                ],
-                "termination_reasons": [
-                    str(trajectory.termination_reason) for trajectory in ordered_rollout
-                ],
-            }
-        )
-
-    ordered_candidates = sorted(
-        preview_candidates,
-        key=lambda item: (
-            float(item["total_reward"]),
-            str(item["example_id"]),
-            str(item["rollout_id"]),
-        ),
-    )
-
-    selected_records: list[dict[str, Any]] = []
-    selected_indices: set[int] = set()
-    preferred_indices = [
-        ("best", len(ordered_candidates) - 1),
-        ("median", (len(ordered_candidates) - 1) // 2),
-        ("worst", 0),
-    ]
-    for preview_slot, index in preferred_indices:
-        if index in selected_indices:
-            continue
-        selected_indices.add(index)
-        record = dict(ordered_candidates[index])
-        record["preview_slot"] = preview_slot
-        selected_records.append(record)
-        if len(selected_records) >= num_samples:
-            break
-
-    if len(selected_records) < num_samples:
-        for index in range(len(ordered_candidates) - 1, -1, -1):
-            if index in selected_indices:
-                continue
-            selected_indices.add(index)
-            record = dict(ordered_candidates[index])
-            record["preview_slot"] = f"extra_{len(selected_records) + 1}"
-            selected_records.append(record)
-            if len(selected_records) >= num_samples:
-                break
-
-    rendered_sections: list[str] = []
-    for record in selected_records:
-        rendered_sections.append(
-            "\n".join(
-                [
-                    (
-                        f"[{record['preview_slot']}] example_id={record['example_id']} "
-                        f"rollout_id={record['rollout_id']} total_reward={record['total_reward']:.4f}"
-                    ),
-                    (
-                        "generated_selfies="
-                        + _render_sequence(
-                            record["generated_selfies_sequence"],
-                            max_chars=max_chars,
-                        )
-                    ),
-                    (
-                        "raw_stage_text="
-                        + _render_sequence(
-                            record["raw_stage_text_sequence"],
-                            max_chars=max_chars,
-                        )
-                    ),
-                    f"stage_rewards={record['stage_rewards']}",
-                    f"termination_reasons={record['termination_reasons']}",
-                    f"valid_sequence={record['valid_sequence']}",
-                    f"duplicate_sequence={record['duplicate_sequence']}",
-                ]
-            )
-        )
-
-    return {
-        "iteration": iteration_index,
-        "records": selected_records,
-        "tracker_text": "\n\n".join(rendered_sections),
-    }
 
 
 class MoleculeWisePPOTrainer:
@@ -300,10 +175,19 @@ class MoleculeWisePPOTrainer:
     ) -> PPOTrainIterationResult:
         trajectories = self.collect_rollouts(examples)
         if not trajectories:
+            metrics = {
+                "iteration": float(iteration_index),
+                "num_stage_trajectories": 0.0,
+            }
             return PPOTrainIterationResult(
-                metrics={
+                metrics=metrics,
+                diagnostic_metrics={
                     "iteration": float(iteration_index),
-                    "num_stage_trajectories": 0.0,
+                    **termination_reason_metrics(()),
+                    **rollout_stage_metrics(
+                        (),
+                        max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
+                    ),
                 },
                 optimizer_step_metrics=[],
             )
@@ -333,8 +217,6 @@ class MoleculeWisePPOTrainer:
         advantages = standardize_tensor(raw_advantages)
 
         action_token_counts = [len(trajectory.action_token_ids) for trajectory in trajectories]
-        termination_reasons = [trajectory.termination_reason for trajectory in trajectories]
-
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_kl = 0.0
@@ -468,18 +350,16 @@ class MoleculeWisePPOTrainer:
             "mean_reference_logprob": _tensor_mean(reference_logprobs),
             "mean_action_token_count": sum(action_token_counts) / max(len(action_token_counts), 1),
             "max_action_token_count": float(max(action_token_counts, default=0)),
-            "empty_action_rate": _mean_bool([count == 0 for count in action_token_counts]),
-            "termination_stop_token_rate": _mean_bool(
-                [reason == "stop_token" for reason in termination_reasons]
-            ),
-            "termination_max_stage_new_tokens_rate": _mean_bool(
-                [reason == "max_stage_new_tokens" for reason in termination_reasons]
-            ),
-            "termination_max_sequence_length_rate": _mean_bool(
-                [reason == "max_sequence_length" for reason in termination_reasons]
+            "empty_action_rate": sum(int(count == 0) for count in action_token_counts)
+            / max(len(action_token_counts), 1),
+            **termination_reason_metrics(trajectories),
+            **rollout_stage_metrics(
+                trajectories,
+                max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
             ),
             **reward_summary,
         }
+        diagnostic_metrics = tracker_diagnostic_metrics(metrics)
         trajectory_preview = None
         if iteration_index % self.config.trajectory_preview_every_iterations == 0:
             trajectory_preview = build_trajectory_preview_payload(
@@ -501,6 +381,7 @@ class MoleculeWisePPOTrainer:
 
         return PPOTrainIterationResult(
             metrics=metrics,
+            diagnostic_metrics=diagnostic_metrics,
             optimizer_step_metrics=optimizer_step_metrics,
             trajectory_preview=trajectory_preview,
         )
@@ -653,7 +534,21 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
             )
             history.append(iteration_result.metrics)
             write_ppo_history(output_dir, history)
-            tracker.log_metrics(iteration_result.metrics, step=iteration, prefix="ppo")
+            tracker.log_metrics(
+                tracker_headline_metrics(iteration_result.metrics),
+                step=iteration,
+                prefix="ppo",
+            )
+            if iteration_result.diagnostic_metrics is not None:
+                append_iteration_diagnostics(
+                    output_dir,
+                    [iteration_result.diagnostic_metrics],
+                )
+                tracker.log_metrics(
+                    iteration_result.diagnostic_metrics,
+                    step=iteration,
+                    prefix="ppo_diagnostics",
+                )
             if iteration_result.optimizer_step_metrics:
                 append_optimizer_step_metrics(
                     output_dir,
@@ -663,12 +558,21 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
                     tracker.log_metrics(
                         diagnostic_metrics,
                         step=int(diagnostic_metrics["optimizer_step"]),
-                        prefix="ppo_step",
+                        prefix="ppo_optimizer",
                     )
             if iteration_result.trajectory_preview is not None:
                 append_trajectory_previews(
                     output_dir,
                     iteration_result.trajectory_preview["records"],
+                )
+                print(
+                    "\n".join(
+                        [
+                            f"[ppo][iteration {iteration}] trajectory preview",
+                            iteration_result.trajectory_preview["tracker_text"],
+                        ]
+                    ),
+                    flush=True,
                 )
                 tracker.log_summary(
                     {

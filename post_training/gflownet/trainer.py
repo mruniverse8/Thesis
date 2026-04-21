@@ -37,9 +37,12 @@ from .diagnostics import (
     GFlowNetTrainIterationResult,
     all_finite,
     build_trajectory_preview_payload,
+    rollout_stage_metrics,
     safe_rate,
     stack_scalar_likes,
     termination_reason_metrics,
+    tracker_diagnostic_metrics,
+    tracker_headline_metrics,
 )
 from .losses import (
     detailed_balance_loss,
@@ -282,10 +285,15 @@ class MultiMoleculeGFlowNetTrainer:
                 "action_tokens_per_sec": 0.0,
                 "all_finite": True,
                 **termination_reason_metrics(on_policy_trajectories),
+                **rollout_stage_metrics(
+                    on_policy_trajectories,
+                    max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
+                    invalid_terminal_reward=self.config.invalid_terminal_reward,
+                ),
             }
             diagnostic_metrics = None
             if iteration_index % self.config.diagnostic_log_every_iterations == 0:
-                diagnostic_metrics = dict(metrics)
+                diagnostic_metrics = tracker_diagnostic_metrics(metrics)
             return GFlowNetTrainIterationResult(
                 metrics=metrics,
                 diagnostic_metrics=diagnostic_metrics,
@@ -429,11 +437,16 @@ class MultiMoleculeGFlowNetTrainer:
             ),
             **diagnostics,
             **termination_reason_metrics(on_policy_trajectories),
+            **rollout_stage_metrics(
+                on_policy_trajectories,
+                max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
+                invalid_terminal_reward=self.config.invalid_terminal_reward,
+            ),
         }
 
         diagnostic_metrics = None
         if iteration_index % self.config.diagnostic_log_every_iterations == 0:
-            diagnostic_metrics = dict(metrics)
+            diagnostic_metrics = tracker_diagnostic_metrics(metrics)
 
         trajectory_preview = None
         if iteration_index % self.config.trajectory_preview_every_iterations == 0:
@@ -550,8 +563,6 @@ def _build_gflownet_tracking_summary(summary: dict[str, object]) -> dict[str, ob
         "mean_stage_reward",
         "valid_fraction",
         "objective_loss",
-        "replay_size",
-        "replay_total_action_tokens",
     ):
         if key in last_metrics:
             tracking_summary[f"last_{key}"] = last_metrics[key]
@@ -649,7 +660,11 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
             )
             history.append(iteration_result.metrics)
             write_gflownet_history(output_dir, history)
-            tracker.log_metrics(iteration_result.metrics, step=iteration, prefix="gflownet")
+            tracker.log_metrics(
+                tracker_headline_metrics(iteration_result.metrics),
+                step=iteration,
+                prefix="gflownet",
+            )
             if iteration_result.diagnostic_metrics is not None:
                 append_iteration_diagnostics(
                     output_dir,
@@ -658,7 +673,7 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
                 tracker.log_metrics(
                     iteration_result.diagnostic_metrics,
                     step=iteration,
-                    prefix="gflownet_step",
+                    prefix="gflownet_diagnostics",
                 )
             if iteration_result.trajectory_preview is not None:
                 append_trajectory_previews(

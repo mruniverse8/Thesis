@@ -34,11 +34,13 @@ class _FakeResponse:
         headers: dict[str, str] | None = None,
         cookies: dict[str, str] | None = None,
         text: str = "",
+        url: str = "https://drive.google.com/uc",
     ) -> None:
         self._content = content
         self.headers = headers or {}
         self.cookies = cookies or {}
         self.text = text
+        self.url = url
 
     def iter_content(self, chunk_size: int = 1024):
         for start in range(0, len(self._content), chunk_size):
@@ -130,6 +132,44 @@ def test_download_google_drive_zip_handles_confirm_token(tmp_path: Path) -> None
         "export": "download",
         "id": DEFAULT_TRAIN_DATASET_FILE_ID,
         "confirm": "token123",
+    }
+
+
+def test_download_google_drive_zip_handles_virus_scan_form(tmp_path: Path) -> None:
+    archive_path = tmp_path / "dataset.zip"
+    zip_bytes = _build_zip_bytes()
+    session = _FakeSession(
+        [
+            _FakeResponse(
+                b"<html>virus scan warning</html>",
+                headers={"content-type": "text/html; charset=utf-8"},
+                text=(
+                    "<form action='https://drive.usercontent.google.com/download'>"
+                    f"<input type='hidden' name='id' value='{DEFAULT_TRAIN_DATASET_FILE_ID}'/>"
+                    "<input type='hidden' name='export' value='download'/>"
+                    "<input type='hidden' name='confirm' value='t'/>"
+                    "<input type='hidden' name='uuid' value='uuid-123'/>"
+                    "</form>"
+                ),
+                url=(
+                    "https://drive.usercontent.google.com/download"
+                    f"?id={DEFAULT_TRAIN_DATASET_FILE_ID}&export=download"
+                ),
+            ),
+            _FakeResponse(zip_bytes, headers={"content-type": "application/zip"}),
+        ]
+    )
+
+    download_google_drive_zip(DEFAULT_TRAIN_DATASET_FILE_ID, archive_path, session=session)
+
+    assert archive_path.exists()
+    assert len(session.calls) == 2
+    assert session.calls[1]["url"] == "https://drive.usercontent.google.com/download"
+    assert session.calls[1]["params"] == {
+        "id": DEFAULT_TRAIN_DATASET_FILE_ID,
+        "export": "download",
+        "confirm": "t",
+        "uuid": "uuid-123",
     }
 
 

@@ -49,6 +49,10 @@ ppo:
   value_loss_coef: 0.5
   entropy_coef: 0.0
   max_grad_norm: 1.0
+  diagnostic_log_every_optimizer_steps: 10
+  trajectory_preview_every_iterations: 5
+  num_trajectory_samples_to_log: 3
+  trajectory_preview_max_chars: 240
   rollout:
     max_source_length: 512
     max_stage_new_tokens: 192

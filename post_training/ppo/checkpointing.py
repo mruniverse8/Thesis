@@ -46,6 +46,15 @@ def append_optimizer_step_metrics(
     return diagnostics_path
 
 
+def append_iteration_diagnostics(
+    output_dir: str | Path,
+    metrics: Sequence[dict[str, Any]],
+) -> Path:
+    diagnostics_path = Path(output_dir) / "diagnostics" / "iteration_diagnostics.jsonl"
+    _append_jsonl(diagnostics_path, metrics)
+    return diagnostics_path
+
+
 def append_trajectory_previews(
     output_dir: str | Path,
     previews: Sequence[dict[str, Any]],

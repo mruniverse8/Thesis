@@ -159,13 +159,25 @@ def test_build_trajectory_preview_payload_selects_best_median_and_worst_rollouts
             rollout_id="rollout-2",
             example_id="shared-example",
             stage_index=1,
-            reward=3.0,
+            reward=1.0,
             old_value=0.0,
             old_logprob=-0.5,
             reference_logprob=-0.7,
             action_token_ids=(2,),
             sampled_selfies="B",
             stage_text="B",
+        ),
+        _make_stage_trajectory(
+            rollout_id="rollout-2",
+            example_id="shared-example",
+            stage_index=2,
+            reward=2.0,
+            old_value=0.0,
+            old_logprob=-0.4,
+            reference_logprob=-0.6,
+            action_token_ids=(4,),
+            sampled_selfies="B2",
+            stage_text="B2",
         ),
         _make_stage_trajectory(
             rollout_id="rollout-3",
@@ -195,7 +207,9 @@ def test_build_trajectory_preview_payload_selects_best_median_and_worst_rollouts
         "rollout-3",
         "rollout-1",
     ]
-    assert "generated_selfies=B" in preview["tracker_text"]
+    assert preview["records"][0]["num_stages"] == 2
+    assert "num_stages=2" in preview["tracker_text"]
+    assert "generated_selfies=B | B2" in preview["tracker_text"]
     assert "generated_selfies=C" in preview["tracker_text"]
     assert "generated_selfies=A" in preview["tracker_text"]
 
@@ -302,12 +316,14 @@ def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkey
 
     result = trainer.train_iteration([{"id": "unused"}], iteration_index=1)
 
-    assert {"reward_std", "mean_old_logprob", "termination_max_sequence_length_rate"} <= set(
+    assert {"reward_std", "mean_old_logprob", "termination_fraction_max_sequence_length"} <= set(
         result.metrics
     )
     assert abs(result.metrics["standardized_advantage_mean"]) < 1.0e-6
     assert result.metrics["max_action_token_count"] == 2.0
     assert result.metrics["empty_action_rate"] == 1.0 / 3.0
+    assert result.diagnostic_metrics is not None
+    assert result.diagnostic_metrics["mean_realized_stage_count"] == 1.0
     assert len(result.optimizer_step_metrics) == 1
     assert result.optimizer_step_metrics[0]["optimizer_step"] == 2
     assert result.optimizer_step_metrics[0]["mini_batch_size"] == 1
@@ -315,6 +331,7 @@ def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkey
     assert "clip_fraction" in result.optimizer_step_metrics[0]
     assert result.trajectory_preview is not None
     assert len(result.trajectory_preview["records"]) == 2
+    assert all(record["num_stages"] == 1 for record in result.trajectory_preview["records"])
 
 
 def test_resolve_ppo_checkpoint_source_prefers_existing_local_checkpoint(tmp_path: Path) -> None:
@@ -807,6 +824,13 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
                     "mean_policy_loss": 0.3,
                     "mean_value_loss": 0.4,
                     "num_stage_trajectories": 2.0,
+                    "mean_realized_stage_count": 1.5,
+                    "fraction_rollouts_reaching_stage_2": 0.5,
+                },
+                diagnostic_metrics={
+                    "iteration": float(iteration_index),
+                    "mean_realized_stage_count": 1.5,
+                    "fraction_rollouts_reaching_stage_2": 0.5,
                 },
                 optimizer_step_metrics=[
                     {
@@ -836,6 +860,8 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
                             "preview_slot": "best",
                             "rollout_id": "sample-0000-example-1",
                             "example_id": "example-1",
+                            "num_stages": 2,
+                            "stage_indices": [1, 2],
                             "total_reward": 3.0,
                             "stage_rewards": [1.0, 2.0],
                             "generated_selfies_sequence": ["A", "B"],
@@ -929,8 +955,14 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
 
     summary = run_molecule_stage_ppo(config)
 
+    iteration_diagnostics_path = output_dir / "diagnostics" / "iteration_diagnostics.jsonl"
     optimizer_diagnostics_path = output_dir / "diagnostics" / "optimizer_step_metrics.jsonl"
     trajectory_previews_path = output_dir / "diagnostics" / "trajectory_previews.jsonl"
+    iteration_diagnostics_records = [
+        json.loads(line)
+        for line in iteration_diagnostics_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     optimizer_records = [
         json.loads(line)
         for line in optimizer_diagnostics_path.read_text(encoding="utf-8").splitlines()
@@ -943,12 +975,35 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
     ]
 
     assert summary["num_iterations"] == 1
-    assert any(prefix == "ppo" for _, _, prefix in tracker.metric_calls)
-    assert any(prefix == "ppo_step" for _, _, prefix in tracker.metric_calls)
+    headline_calls = [payload for payload, _, prefix in tracker.metric_calls if prefix == "ppo"]
+    diagnostic_calls = [
+        payload for payload, _, prefix in tracker.metric_calls if prefix == "ppo_diagnostics"
+    ]
+    optimizer_calls = [
+        payload for payload, _, prefix in tracker.metric_calls if prefix == "ppo_optimizer"
+    ]
+    assert headline_calls
+    assert "mean_realized_stage_count" not in headline_calls[0]
+    assert diagnostic_calls == [
+        {
+            "iteration": 1.0,
+            "mean_realized_stage_count": 1.5,
+            "fraction_rollouts_reaching_stage_2": 0.5,
+        }
+    ]
+    assert optimizer_calls
     assert any(
         summary_payload.get("latest_trajectory_preview") == "preview text"
         for summary_payload, prefix in tracker.summary_calls
         if prefix == "ppo"
     )
+    assert iteration_diagnostics_records == [
+        {
+            "iteration": 1.0,
+            "mean_realized_stage_count": 1.5,
+            "fraction_rollouts_reaching_stage_2": 0.5,
+        }
+    ]
     assert optimizer_records[0]["optimizer_step"] == 25
     assert trajectory_records[0]["example_id"] == "example-1"
+    assert trajectory_records[0]["num_stages"] == 2

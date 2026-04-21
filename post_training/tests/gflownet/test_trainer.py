@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from zipfile import ZipFile
 
+import pytest
 import torch
 
 from src.constants import EOM_TOKEN
@@ -21,13 +22,16 @@ def _make_sampled_trajectory(
     terminal_reward: float,
     stage_index: int = 1,
     action_token_ids: tuple[int, ...] = (1, 2),
+    target_selfies_list: tuple[str, ...] = ("[C][C][O]",),
+    termination_reason: str = "stop_token",
+    is_valid: bool = True,
 ) -> SampledStageTrajectory:
     return SampledStageTrajectory(
         rollout_id=rollout_id,
         example_id=f"example-{rollout_id}",
         prompt_text="prompt",
         description="description",
-        target_selfies_list=("[C][C][O]",),
+        target_selfies_list=target_selfies_list,
         stage_index=stage_index,
         decoder_prefix_text="",
         previous_valid_selfies=(),
@@ -38,8 +42,8 @@ def _make_sampled_trajectory(
         prefix_rewards=tuple([1.0e-4] * len(action_token_ids) + [terminal_reward]),
         terminal_reward=terminal_reward,
         stop_token=EOM_TOKEN,
-        termination_reason="stop_token",
-        is_valid=True,
+        termination_reason=termination_reason,
+        is_valid=is_valid,
         is_duplicate=False,
     )
 
@@ -75,9 +79,26 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     )
 
     on_policy = [
-        _make_sampled_trajectory(rollout_id="fresh-1", terminal_reward=2.0),
-        _make_sampled_trajectory(rollout_id="fresh-2", terminal_reward=3.0, stage_index=2),
-        _make_sampled_trajectory(rollout_id="fresh-3", terminal_reward=4.0, stage_index=3),
+        _make_sampled_trajectory(
+            rollout_id="fresh-1",
+            terminal_reward=2.0,
+            target_selfies_list=("[C][C][O]", "[C][C][N]"),
+        ),
+        _make_sampled_trajectory(
+            rollout_id="fresh-1",
+            terminal_reward=3.0,
+            stage_index=2,
+            target_selfies_list=("[C][C][O]", "[C][C][N]"),
+        ),
+        _make_sampled_trajectory(
+            rollout_id="fresh-2",
+            terminal_reward=1.0e-4,
+            action_token_ids=(1, 2, 3, 4),
+            target_selfies_list=("[C][C][O]", "[C][C][N]", "[C][O][O]"),
+            termination_reason="max_stage_new_tokens",
+            is_valid=False,
+        ),
+        _make_sampled_trajectory(rollout_id="fresh-3", terminal_reward=4.0),
     ]
     replay_item = _make_sampled_trajectory(rollout_id="replay-1", terminal_reward=1.5)
     trainer.replay_buffer.add(replay_item)
@@ -116,13 +137,37 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     result = trainer.train_iteration([{"id": "unused"}], iteration_index=1)
     metrics = result.metrics
 
-    assert metrics["num_on_policy_trajectories"] == 3.0
+    assert metrics["num_on_policy_trajectories"] == 4.0
     assert metrics["num_replay_trajectories"] == 1.0
-    assert metrics["replay_size"] == 4.0
-    assert metrics["replay_total_action_tokens"] == 8.0
-    assert metrics["mean_stage_reward"] == 3.0
-    assert metrics["mean_stage_index"] == 2.0
-    assert metrics["termination_fraction_stop_token"] == 1.0
+    assert metrics["replay_size"] == 5.0
+    assert metrics["replay_total_action_tokens"] == 12.0
+    assert metrics["mean_stage_reward"] == pytest.approx((2.0 + 3.0 + 1.0e-4 + 4.0) / 4.0)
+    assert metrics["valid_fraction"] == pytest.approx(0.75)
+    assert metrics["mean_num_actions"] == pytest.approx(2.5)
+    assert metrics["max_num_actions"] == pytest.approx(4.0)
+    assert metrics["mean_stage_index"] == pytest.approx(1.25)
+    assert metrics["termination_fraction_stop_token"] == pytest.approx(0.75)
+    assert metrics["termination_fraction_max_stage_new_tokens"] == pytest.approx(0.25)
+    assert metrics["num_rollouts"] == pytest.approx(3.0)
+    assert metrics["max_stage_index"] == pytest.approx(2.0)
+    assert metrics["mean_planned_stage_count"] == pytest.approx(2.0)
+    assert metrics["max_planned_stage_count"] == pytest.approx(3.0)
+    assert metrics["mean_realized_stage_count"] == pytest.approx(4.0 / 3.0)
+    assert metrics["max_realized_stage_count"] == pytest.approx(2.0)
+    assert metrics["fraction_rollouts_planned_stage_2_plus"] == pytest.approx(2.0 / 3.0)
+    assert metrics["fraction_rollouts_reaching_stage_2"] == pytest.approx(1.0 / 3.0)
+    assert metrics["fraction_rollouts_reaching_planned_stage_count"] == pytest.approx(2.0 / 3.0)
+    assert metrics["rollout_stage_count_1_fraction"] == pytest.approx(2.0 / 3.0)
+    assert metrics["rollout_stage_count_2_fraction"] == pytest.approx(1.0 / 3.0)
+    assert metrics["invalid_reward_floor_fraction"] == pytest.approx(0.25)
+    assert metrics["stage1_num_trajectories"] == pytest.approx(3.0)
+    assert metrics["stage1_valid_fraction"] == pytest.approx(2.0 / 3.0)
+    assert metrics["stage1_invalid_reward_floor_fraction"] == pytest.approx(1.0 / 3.0)
+    assert metrics["stage1_termination_fraction_stop_token"] == pytest.approx(2.0 / 3.0)
+    assert metrics["stage1_termination_fraction_max_stage_new_tokens"] == pytest.approx(1.0 / 3.0)
+    assert metrics["stage2_num_trajectories"] == pytest.approx(1.0)
+    assert metrics["stage2_valid_fraction"] == pytest.approx(1.0)
+    assert metrics["stage2_termination_fraction_stop_token"] == pytest.approx(1.0)
     assert metrics["all_finite"] is True
     assert "objective_loss" in metrics
     assert "grad_norm" in metrics
@@ -278,11 +323,15 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
                     "valid_fraction": 1.0,
                     "replay_size": 0.0,
                     "replay_total_action_tokens": 0.0,
+                    "mean_realized_stage_count": 1.0,
+                    "fraction_rollouts_reaching_stage_2": 0.0,
                 },
                 diagnostic_metrics={
                     "iteration": float(iteration_index),
                     "grad_norm": 0.5,
                     "sampling_duration_sec": 0.25,
+                    "mean_realized_stage_count": 1.0,
+                    "fraction_rollouts_reaching_stage_2": 0.0,
                 },
                 trajectory_preview={
                     "iteration": iteration_index,
@@ -424,11 +473,14 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
                 "iteration": 1.0,
                 "grad_norm": 0.5,
                 "sampling_duration_sec": 0.25,
+                "mean_realized_stage_count": 1.0,
+                "fraction_rollouts_reaching_stage_2": 0.0,
             },
             1,
-            "gflownet_step",
+            "gflownet_diagnostics",
         ),
     ]
+    assert "mean_realized_stage_count" not in tracker.metric_calls[0][0]
     assert tracker.summary_calls[0] == (
         {
             "latest_trajectory_preview": "preview-text",
@@ -447,6 +499,8 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "iteration": 1.0,
             "grad_norm": 0.5,
             "sampling_duration_sec": 0.25,
+            "mean_realized_stage_count": 1.0,
+            "fraction_rollouts_reaching_stage_2": 0.0,
         }
     ]
     assert [json.loads(line) for line in trajectory_previews.read_text().splitlines()] == [
