@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 import shutil
 import sys
+import tempfile
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 from zipfile import ZIP_DEFLATED, ZipFile
@@ -32,6 +33,54 @@ def default_checkpoint_archive_path(checkpoint_dir: str | Path) -> Path:
     return checkpoint_path.parent / f"{checkpoint_path.name}.zip"
 
 
+def _path_is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def archive_directory_to_zip(
+    source_dir: str | Path,
+    archive_path: str | Path,
+    *,
+    root_name: str | None = None,
+) -> Path:
+    resolved_source_dir = Path(source_dir)
+    if not resolved_source_dir.exists():
+        raise FileNotFoundError(f"Missing directory to archive: {resolved_source_dir}")
+    if not resolved_source_dir.is_dir():
+        raise ValueError(f"Expected a directory to archive at {resolved_source_dir}")
+
+    destination = Path(archive_path)
+    ensure_dir(destination.parent)
+
+    source_root_name = root_name or resolved_source_dir.name
+    source_root = resolved_source_dir.resolve()
+    destination_absolute = destination.expanduser().resolve(strict=False)
+    destination_is_within_source = _path_is_within(destination_absolute, source_root)
+    if destination_is_within_source and destination.exists():
+        destination.unlink()
+
+    with tempfile.TemporaryDirectory(dir=resolved_source_dir.parent) as temp_dir:
+        staging_archive_path = Path(temp_dir) / destination.name
+        with ZipFile(staging_archive_path, "w", compression=ZIP_DEFLATED) as archive:
+            for file_path in sorted(resolved_source_dir.rglob("*")):
+                if not file_path.is_file():
+                    continue
+                archive.write(
+                    file_path,
+                    arcname=str(Path(source_root_name) / file_path.relative_to(resolved_source_dir)),
+                )
+
+        if destination.exists():
+            destination.unlink()
+        shutil.move(str(staging_archive_path), str(destination))
+
+    return destination
+
+
 def archive_checkpoint_directory(
     checkpoint_dir: str | Path,
     archive_path: str | Path | None = None,
@@ -47,16 +96,7 @@ def archive_checkpoint_directory(
         if archive_path is not None
         else default_checkpoint_archive_path(source_dir)
     )
-    ensure_dir(destination.parent)
-
-    with ZipFile(destination, "w", compression=ZIP_DEFLATED) as archive:
-        for file_path in sorted(source_dir.rglob("*")):
-            if file_path.is_file():
-                archive.write(
-                    file_path,
-                    arcname=str(Path(source_dir.name) / file_path.relative_to(source_dir)),
-                )
-    return destination
+    return archive_directory_to_zip(source_dir, destination, root_name=source_dir.name)
 
 
 def checkpoint_artifact_is_ready(checkpoint_dir: str | Path) -> bool:

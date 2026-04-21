@@ -24,13 +24,20 @@ def parse_args() -> argparse.Namespace:
         default="configs/multi_molecule_sft.yaml",
         help="Path to the YAML training config relative to the project root.",
     )
+    parser.add_argument(
+        "--output-dir",
+        help="Optional override for training.output_dir.",
+    )
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
     config_path = resolve_path(args.config, PROJECT_ROOT)
-    config = resolve_multi_molecule_sft_config_paths(load_yaml(config_path), project_root=PROJECT_ROOT)
+    raw_config = load_yaml(config_path)
+    if args.output_dir:
+        raw_config.setdefault("training", {})["output_dir"] = args.output_dir
+    config = resolve_multi_molecule_sft_config_paths(raw_config, project_root=PROJECT_ROOT)
     set_seed(int(config.get("seed", 42)))
 
     summary = run_multi_molecule_sft(config)

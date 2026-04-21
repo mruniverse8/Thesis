@@ -11,6 +11,7 @@ import pytest
 from colab.thesis_colab_support import get_bootstrap_environment as get_colab_environment
 from kaggle.thesis_kaggle_support import get_bootstrap_environment as get_kaggle_environment
 from src.checkpoint_bootstrap import (
+    archive_directory_to_zip,
     archive_checkpoint_directory,
     build_gflownet_checkpoint_prep_command,
     build_ppo_checkpoint_prep_command,
@@ -121,6 +122,110 @@ def test_new_bootstrap_scripts_import_cleanly() -> None:
         assert spec is not None and spec.loader is not None
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
+
+
+def test_train_multi_molecule_sft_script_applies_output_dir_override_before_path_resolution(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    pytest.importorskip("transformers")
+    module = _load_script_module(Path("scripts") / "train_multi_molecule_sft.py")
+    resolve_inputs: list[dict[str, object]] = []
+    run_inputs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        module,
+        "load_yaml",
+        lambda _path: {"seed": 42, "training": {"output_dir": "outputs/default_sft"}},
+    )
+
+    def _fake_resolve(config, project_root=None):
+        resolve_inputs.append(config)
+        return config
+
+    def _fake_run(config):
+        run_inputs.append(config)
+        return {"output_dir": config["training"]["output_dir"]}
+
+    monkeypatch.setattr(module, "resolve_multi_molecule_sft_config_paths", _fake_resolve)
+    monkeypatch.setattr(module, "run_multi_molecule_sft", _fake_run)
+    monkeypatch.setattr(module, "set_seed", lambda _seed: None)
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            "train_multi_molecule_sft.py",
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--output-dir",
+            "/content/drive/MyDrive/my_results",
+        ],
+    )
+
+    module.main()
+
+    assert resolve_inputs == [
+        {"seed": 42, "training": {"output_dir": "/content/drive/MyDrive/my_results"}}
+    ]
+    assert run_inputs == resolve_inputs
+    assert "/content/drive/MyDrive/my_results" in capsys.readouterr().out
+
+
+def test_train_multi_molecule_gflownet_script_applies_relative_output_dir_override_before_path_resolution(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    pytest.importorskip("transformers")
+    module = _load_script_module(Path("scripts") / "train_multi_molecule_gflownet.py")
+    resolve_inputs: list[dict[str, object]] = []
+    run_inputs: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        module,
+        "load_yaml",
+        lambda _path: {
+            "seed": 123,
+            "training": {"output_dir": "outputs/default_gflownet"},
+            "model": {"checkpoint": "outputs/multi_molecule_sft_lpm24/checkpoints/best"},
+        },
+    )
+
+    def _fake_resolve(config, project_root=None):
+        resolve_inputs.append(config)
+        return config
+
+    def _fake_run(config):
+        run_inputs.append(config)
+        return {"output_dir": config["training"]["output_dir"]}
+
+    monkeypatch.setattr(module, "resolve_gflownet_config_paths", _fake_resolve)
+    monkeypatch.setattr(module, "run_multi_molecule_gflownet", _fake_run)
+    monkeypatch.setattr(module, "set_seed", lambda _seed: None)
+    monkeypatch.setattr(
+        module.sys,
+        "argv",
+        [
+            "train_multi_molecule_gflownet.py",
+            "--config",
+            str(tmp_path / "config.yaml"),
+            "--output-dir",
+            "outputs/custom_gflownet_run",
+        ],
+    )
+
+    module.main()
+
+    assert resolve_inputs == [
+        {
+            "seed": 123,
+            "training": {"output_dir": "outputs/custom_gflownet_run"},
+            "model": {"checkpoint": "outputs/multi_molecule_sft_lpm24/checkpoints/best"},
+        }
+    ]
+    assert run_inputs == resolve_inputs
+    assert "outputs/custom_gflownet_run" in capsys.readouterr().out
 
 
 def test_resolve_stage_config_path_uses_stage_default(tmp_path: Path) -> None:
@@ -525,4 +630,33 @@ def test_archive_checkpoint_directory_writes_zip_bundle(tmp_path: Path) -> None:
         assert sorted(archive.namelist()) == [
             "best/config.json",
             "best/tokenizer.json",
+        ]
+
+
+def test_archive_directory_to_zip_can_write_zip_inside_source_dir_without_self_inclusion(
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "my_results"
+    output_dir.mkdir(parents=True)
+    (output_dir / "run_summary.json").write_text("{}\n", encoding="utf-8")
+    archive_path = output_dir / "my_results.zip"
+    archive_path.write_text("stale-archive", encoding="utf-8")
+
+    first_archive = archive_directory_to_zip(output_dir, archive_path)
+
+    assert first_archive == archive_path
+    assert first_archive.exists()
+    with ZipFile(first_archive, "r") as archive:
+        assert sorted(archive.namelist()) == ["my_results/run_summary.json"]
+
+    (output_dir / "checkpoints").mkdir()
+    (output_dir / "checkpoints" / "best.zip").write_text("checkpoint", encoding="utf-8")
+
+    second_archive = archive_directory_to_zip(output_dir, archive_path)
+
+    assert second_archive == archive_path
+    with ZipFile(second_archive, "r") as archive:
+        assert sorted(archive.namelist()) == [
+            "my_results/checkpoints/best.zip",
+            "my_results/run_summary.json",
         ]
