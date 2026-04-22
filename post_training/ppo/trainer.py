@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import json
 import random
 from typing import Any, Sequence
@@ -20,10 +20,17 @@ from post_training.shared.decoding import (
     StageTokenConstraints,
     build_stage_token_constraints,
 )
+from post_training.shared.diagnostics import (
+    build_categorized_metric_record,
+    categorize_metric_payload,
+    iter_categorized_tracker_payloads,
+)
 from post_training.sft_multi.dataset import MultiMoleculeDataset
 
 from .checkpointing import (
     append_iteration_diagnostics,
+    append_iteration_diagnostics_categorized,
+    append_optimizer_step_metrics_categorized,
     append_optimizer_step_metrics,
     append_trajectory_previews,
     prepare_ppo_output_dir,
@@ -79,6 +86,8 @@ class PPOTrainIterationResult:
     metrics: dict[str, float]
     optimizer_step_metrics: list[dict[str, Any]]
     diagnostic_metrics: dict[str, Any] | None = None
+    categorized_diagnostic_metrics: dict[str, dict[str, Any]] | None = None
+    categorized_optimizer_step_metrics: list[dict[str, dict[str, Any]]] = field(default_factory=list)
     trajectory_preview: dict[str, Any] | None = None
 
 
@@ -189,6 +198,17 @@ class MoleculeWisePPOTrainer:
                         max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
                     ),
                 },
+                categorized_diagnostic_metrics=categorize_metric_payload(
+                    {
+                        "iteration": float(iteration_index),
+                        **termination_reason_metrics(()),
+                        **rollout_stage_metrics(
+                            (),
+                            max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
+                        ),
+                    },
+                    metadata_keys=("iteration",),
+                ),
                 optimizer_step_metrics=[],
             )
 
@@ -360,6 +380,17 @@ class MoleculeWisePPOTrainer:
             **reward_summary,
         }
         diagnostic_metrics = tracker_diagnostic_metrics(metrics)
+        categorized_diagnostic_metrics = categorize_metric_payload(
+            diagnostic_metrics,
+            metadata_keys=("iteration",),
+        )
+        categorized_optimizer_step_metrics = [
+            categorize_metric_payload(
+                optimizer_metrics,
+                metadata_keys=("optimizer_step", "ppo_iteration"),
+            )
+            for optimizer_metrics in optimizer_step_metrics
+        ]
         trajectory_preview = None
         if iteration_index % self.config.trajectory_preview_every_iterations == 0:
             trajectory_preview = build_trajectory_preview_payload(
@@ -382,7 +413,9 @@ class MoleculeWisePPOTrainer:
         return PPOTrainIterationResult(
             metrics=metrics,
             diagnostic_metrics=diagnostic_metrics,
+            categorized_diagnostic_metrics=categorized_diagnostic_metrics,
             optimizer_step_metrics=optimizer_step_metrics,
+            categorized_optimizer_step_metrics=categorized_optimizer_step_metrics,
             trajectory_preview=trajectory_preview,
         )
 
@@ -544,15 +577,52 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
                     output_dir,
                     [iteration_result.diagnostic_metrics],
                 )
+                append_iteration_diagnostics_categorized(
+                    output_dir,
+                    [
+                        build_categorized_metric_record(
+                            iteration_result.diagnostic_metrics,
+                            metadata_keys=("iteration",),
+                            categories=iteration_result.categorized_diagnostic_metrics,
+                        )
+                    ],
+                )
                 tracker.log_metrics(
                     iteration_result.diagnostic_metrics,
                     step=iteration,
                     prefix="ppo_diagnostics",
                 )
+                for prefix, payload in iter_categorized_tracker_payloads(
+                    iteration_result.diagnostic_metrics,
+                    base_prefix="ppo_diagnostics",
+                    metadata_keys=("iteration",),
+                ):
+                    tracker.log_metrics(
+                        payload,
+                        step=iteration,
+                        prefix=prefix,
+                    )
             if iteration_result.optimizer_step_metrics:
                 append_optimizer_step_metrics(
                     output_dir,
                     iteration_result.optimizer_step_metrics,
+                )
+                append_optimizer_step_metrics_categorized(
+                    output_dir,
+                    [
+                        build_categorized_metric_record(
+                            diagnostic_metrics,
+                            metadata_keys=("optimizer_step", "ppo_iteration"),
+                            categories=(
+                                iteration_result.categorized_optimizer_step_metrics[index]
+                                if index < len(iteration_result.categorized_optimizer_step_metrics)
+                                else None
+                            ),
+                        )
+                        for index, diagnostic_metrics in enumerate(
+                            iteration_result.optimizer_step_metrics
+                        )
+                    ],
                 )
                 for diagnostic_metrics in iteration_result.optimizer_step_metrics:
                     tracker.log_metrics(
@@ -560,6 +630,16 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
                         step=int(diagnostic_metrics["optimizer_step"]),
                         prefix="ppo_optimizer",
                     )
+                    for prefix, payload in iter_categorized_tracker_payloads(
+                        diagnostic_metrics,
+                        base_prefix="ppo_optimizer",
+                        metadata_keys=("optimizer_step", "ppo_iteration"),
+                    ):
+                        tracker.log_metrics(
+                            payload,
+                            step=int(diagnostic_metrics["optimizer_step"]),
+                            prefix=prefix,
+                        )
             if iteration_result.trajectory_preview is not None:
                 append_trajectory_previews(
                     output_dir,

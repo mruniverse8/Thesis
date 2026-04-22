@@ -175,6 +175,11 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     assert "action_tokens_per_sec" in metrics
     assert "mean_log_pf_token" in metrics
     assert result.diagnostic_metrics is not None
+    assert result.categorized_diagnostic_metrics is not None
+    assert result.categorized_diagnostic_metrics["sec_timer"]["sampling_duration_sec"] > 0.0
+    assert result.categorized_diagnostic_metrics["stage_rollout"]["mean_realized_stage_count"] == pytest.approx(
+        4.0 / 3.0
+    )
     assert result.trajectory_preview is not None
     assert len(result.trajectory_preview["records"]) == 3
     assert {record["preview_slot"] for record in result.trajectory_preview["records"]} == {
@@ -455,32 +460,47 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
         ("tokenizer", DEFAULT_PPO_FALLBACK_CHECKPOINT),
         ("model", DEFAULT_PPO_FALLBACK_CHECKPOINT),
     ]
-    assert tracker.metric_calls == [
-        (
-            {
-                "iteration": 1.0,
-                "objective_loss": 1.25,
-                "mean_stage_reward": 2.5,
-                "valid_fraction": 1.0,
-                "replay_size": 0.0,
-                "replay_total_action_tokens": 0.0,
-            },
-            1,
-            "gflownet",
-        ),
-        (
-            {
-                "iteration": 1.0,
-                "grad_norm": 0.5,
-                "sampling_duration_sec": 0.25,
-                "mean_realized_stage_count": 1.0,
-                "fraction_rollouts_reaching_stage_2": 0.0,
-            },
-            1,
-            "gflownet_diagnostics",
-        ),
+    headline_calls = [payload for payload, _, prefix in tracker.metric_calls if prefix == "gflownet"]
+    diagnostic_calls = [
+        payload for payload, _, prefix in tracker.metric_calls if prefix == "gflownet_diagnostics"
     ]
-    assert "mean_realized_stage_count" not in tracker.metric_calls[0][0]
+    categorized_calls = {
+        prefix: payload
+        for payload, _, prefix in tracker.metric_calls
+        if prefix.startswith("gflownet_diagnostics_")
+    }
+    assert headline_calls == [
+        {
+            "iteration": 1.0,
+            "objective_loss": 1.25,
+            "mean_stage_reward": 2.5,
+            "valid_fraction": 1.0,
+            "replay_size": 0.0,
+            "replay_total_action_tokens": 0.0,
+        }
+    ]
+    assert diagnostic_calls == [
+        {
+            "iteration": 1.0,
+            "grad_norm": 0.5,
+            "sampling_duration_sec": 0.25,
+            "mean_realized_stage_count": 1.0,
+            "fraction_rollouts_reaching_stage_2": 0.0,
+        }
+    ]
+    assert categorized_calls == {
+        "gflownet_diagnostics_stage_rollout": {
+            "mean_realized_stage_count": 1.0,
+            "fraction_rollouts_reaching_stage_2": 0.0,
+        },
+        "gflownet_diagnostics_sec_timer": {
+            "sampling_duration_sec": 0.25,
+        },
+        "gflownet_diagnostics_numerics": {
+            "grad_norm": 0.5,
+        },
+    }
+    assert "mean_realized_stage_count" not in headline_calls[0]
     assert tracker.summary_calls[0] == (
         {
             "latest_trajectory_preview": "preview-text",
@@ -491,8 +511,10 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
     assert tracker.summary_calls[1][1] == "gflownet"
     diagnostics_dir = output_dir / "diagnostics"
     iteration_diagnostics = diagnostics_dir / "iteration_diagnostics.jsonl"
+    iteration_diagnostics_categorized = diagnostics_dir / "iteration_diagnostics_categorized.jsonl"
     trajectory_previews = diagnostics_dir / "trajectory_previews.jsonl"
     assert iteration_diagnostics.exists()
+    assert iteration_diagnostics_categorized.exists()
     assert trajectory_previews.exists()
     assert [json.loads(line) for line in iteration_diagnostics.read_text().splitlines()] == [
         {
@@ -501,6 +523,23 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "sampling_duration_sec": 0.25,
             "mean_realized_stage_count": 1.0,
             "fraction_rollouts_reaching_stage_2": 0.0,
+        }
+    ]
+    assert [json.loads(line) for line in iteration_diagnostics_categorized.read_text().splitlines()] == [
+        {
+            "iteration": 1.0,
+            "categories": {
+                "stage_rollout": {
+                    "mean_realized_stage_count": 1.0,
+                    "fraction_rollouts_reaching_stage_2": 0.0,
+                },
+                "sec_timer": {
+                    "sampling_duration_sec": 0.25,
+                },
+                "numerics": {
+                    "grad_norm": 0.5,
+                },
+            },
         }
     ]
     assert [json.loads(line) for line in trajectory_previews.read_text().splitlines()] == [

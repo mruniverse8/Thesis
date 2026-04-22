@@ -21,11 +21,17 @@ from post_training.shared.decoding import (
     StageTokenConstraints,
     build_stage_token_constraints,
 )
+from post_training.shared.diagnostics import (
+    build_categorized_metric_record,
+    categorize_metric_payload,
+    iter_categorized_tracker_payloads,
+)
 from post_training.sft_multi.dataset import MultiMoleculeDataset
 
 from .buffer import OnPolicyBatch, TrajectoryReplayBuffer
 from .checkpointing import (
     append_iteration_diagnostics,
+    append_iteration_diagnostics_categorized,
     append_trajectory_previews,
     prepare_gflownet_output_dir,
     save_gflownet_checkpoint_artifacts,
@@ -292,11 +298,17 @@ class MultiMoleculeGFlowNetTrainer:
                 ),
             }
             diagnostic_metrics = None
+            categorized_diagnostic_metrics = None
             if iteration_index % self.config.diagnostic_log_every_iterations == 0:
                 diagnostic_metrics = tracker_diagnostic_metrics(metrics)
+                categorized_diagnostic_metrics = categorize_metric_payload(
+                    diagnostic_metrics,
+                    metadata_keys=("iteration",),
+                )
             return GFlowNetTrainIterationResult(
                 metrics=metrics,
                 diagnostic_metrics=diagnostic_metrics,
+                categorized_diagnostic_metrics=categorized_diagnostic_metrics,
             )
 
         replay_trajectories: list[SampledStageTrajectory] = []
@@ -445,8 +457,13 @@ class MultiMoleculeGFlowNetTrainer:
         }
 
         diagnostic_metrics = None
+        categorized_diagnostic_metrics = None
         if iteration_index % self.config.diagnostic_log_every_iterations == 0:
             diagnostic_metrics = tracker_diagnostic_metrics(metrics)
+            categorized_diagnostic_metrics = categorize_metric_payload(
+                diagnostic_metrics,
+                metadata_keys=("iteration",),
+            )
 
         trajectory_preview = None
         if iteration_index % self.config.trajectory_preview_every_iterations == 0:
@@ -476,6 +493,7 @@ class MultiMoleculeGFlowNetTrainer:
         return GFlowNetTrainIterationResult(
             metrics=metrics,
             diagnostic_metrics=diagnostic_metrics,
+            categorized_diagnostic_metrics=categorized_diagnostic_metrics,
             trajectory_preview=trajectory_preview,
         )
 
@@ -670,11 +688,31 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
                     output_dir,
                     [iteration_result.diagnostic_metrics],
                 )
+                append_iteration_diagnostics_categorized(
+                    output_dir,
+                    [
+                        build_categorized_metric_record(
+                            iteration_result.diagnostic_metrics,
+                            metadata_keys=("iteration",),
+                            categories=iteration_result.categorized_diagnostic_metrics,
+                        )
+                    ],
+                )
                 tracker.log_metrics(
                     iteration_result.diagnostic_metrics,
                     step=iteration,
                     prefix="gflownet_diagnostics",
                 )
+                for prefix, payload in iter_categorized_tracker_payloads(
+                    iteration_result.diagnostic_metrics,
+                    base_prefix="gflownet_diagnostics",
+                    metadata_keys=("iteration",),
+                ):
+                    tracker.log_metrics(
+                        payload,
+                        step=iteration,
+                        prefix=prefix,
+                    )
             if iteration_result.trajectory_preview is not None:
                 append_trajectory_previews(
                     output_dir,

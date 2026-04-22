@@ -324,10 +324,15 @@ def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkey
     assert result.metrics["empty_action_rate"] == 1.0 / 3.0
     assert result.diagnostic_metrics is not None
     assert result.diagnostic_metrics["mean_realized_stage_count"] == 1.0
+    assert result.categorized_diagnostic_metrics is not None
+    assert result.categorized_diagnostic_metrics["stage_rollout"]["mean_realized_stage_count"] == 1.0
+    assert result.categorized_diagnostic_metrics["reward_only"]["mean_total_reward"] == 2.0
     assert len(result.optimizer_step_metrics) == 1
     assert result.optimizer_step_metrics[0]["optimizer_step"] == 2
     assert result.optimizer_step_metrics[0]["mini_batch_size"] == 1
     assert result.optimizer_step_metrics[0]["all_finite"] is True
+    assert result.categorized_optimizer_step_metrics[0]["optimizer"]["mini_batch_size"] == 1
+    assert result.categorized_optimizer_step_metrics[0]["numerics"]["all_finite"] is True
     assert "clip_fraction" in result.optimizer_step_metrics[0]
     assert result.trajectory_preview is not None
     assert len(result.trajectory_preview["records"]) == 2
@@ -956,16 +961,32 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
     summary = run_molecule_stage_ppo(config)
 
     iteration_diagnostics_path = output_dir / "diagnostics" / "iteration_diagnostics.jsonl"
+    iteration_diagnostics_categorized_path = (
+        output_dir / "diagnostics" / "iteration_diagnostics_categorized.jsonl"
+    )
     optimizer_diagnostics_path = output_dir / "diagnostics" / "optimizer_step_metrics.jsonl"
+    optimizer_diagnostics_categorized_path = (
+        output_dir / "diagnostics" / "optimizer_step_metrics_categorized.jsonl"
+    )
     trajectory_previews_path = output_dir / "diagnostics" / "trajectory_previews.jsonl"
     iteration_diagnostics_records = [
         json.loads(line)
         for line in iteration_diagnostics_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+    iteration_diagnostics_categorized_records = [
+        json.loads(line)
+        for line in iteration_diagnostics_categorized_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     optimizer_records = [
         json.loads(line)
         for line in optimizer_diagnostics_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    optimizer_categorized_records = [
+        json.loads(line)
+        for line in optimizer_diagnostics_categorized_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     trajectory_records = [
@@ -982,6 +1003,16 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
     optimizer_calls = [
         payload for payload, _, prefix in tracker.metric_calls if prefix == "ppo_optimizer"
     ]
+    categorized_diagnostic_calls = {
+        prefix: payload
+        for payload, _, prefix in tracker.metric_calls
+        if prefix.startswith("ppo_diagnostics_")
+    }
+    categorized_optimizer_calls = {
+        prefix: payload
+        for payload, _, prefix in tracker.metric_calls
+        if prefix.startswith("ppo_optimizer_")
+    }
     assert headline_calls
     assert "mean_realized_stage_count" not in headline_calls[0]
     assert diagnostic_calls == [
@@ -991,7 +1022,34 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
             "fraction_rollouts_reaching_stage_2": 0.5,
         }
     ]
+    assert categorized_diagnostic_calls == {
+        "ppo_diagnostics_stage_rollout": {
+            "mean_realized_stage_count": 1.5,
+            "fraction_rollouts_reaching_stage_2": 0.5,
+        }
+    }
     assert optimizer_calls
+    assert categorized_optimizer_calls == {
+        "ppo_optimizer_optimizer": {
+            "mini_batch_size": 4,
+            "policy_loss": 0.3,
+            "value_loss": 0.4,
+            "total_loss": 0.5,
+            "entropy_bonus": 0.2,
+            "approx_kl_mean": 0.1,
+            "ratio_mean": 1.0,
+            "ratio_std": 0.05,
+            "clip_fraction": 0.0,
+            "batch_advantage_mean": 0.0,
+            "batch_advantage_std": 1.0,
+            "batch_return_mean": 1.5,
+            "new_value_mean": 1.2,
+        },
+        "ppo_optimizer_numerics": {
+            "grad_norm": 0.9,
+            "all_finite": True,
+        },
+    }
     assert any(
         summary_payload.get("latest_trajectory_preview") == "preview text"
         for summary_payload, prefix in tracker.summary_calls
@@ -1004,6 +1062,44 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
             "fraction_rollouts_reaching_stage_2": 0.5,
         }
     ]
+    assert iteration_diagnostics_categorized_records == [
+        {
+            "iteration": 1.0,
+            "categories": {
+                "stage_rollout": {
+                    "mean_realized_stage_count": 1.5,
+                    "fraction_rollouts_reaching_stage_2": 0.5,
+                }
+            },
+        }
+    ]
     assert optimizer_records[0]["optimizer_step"] == 25
+    assert optimizer_categorized_records == [
+        {
+            "optimizer_step": 25,
+            "ppo_iteration": 1,
+            "categories": {
+                "optimizer": {
+                    "mini_batch_size": 4,
+                    "policy_loss": 0.3,
+                    "value_loss": 0.4,
+                    "total_loss": 0.5,
+                    "entropy_bonus": 0.2,
+                    "approx_kl_mean": 0.1,
+                    "ratio_mean": 1.0,
+                    "ratio_std": 0.05,
+                    "clip_fraction": 0.0,
+                    "batch_advantage_mean": 0.0,
+                    "batch_advantage_std": 1.0,
+                    "batch_return_mean": 1.5,
+                    "new_value_mean": 1.2,
+                },
+                "numerics": {
+                    "grad_norm": 0.9,
+                    "all_finite": True,
+                },
+            },
+        }
+    ]
     assert trajectory_records[0]["example_id"] == "example-1"
     assert trajectory_records[0]["num_stages"] == 2

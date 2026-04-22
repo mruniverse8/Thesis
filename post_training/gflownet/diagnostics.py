@@ -304,6 +304,7 @@ def rollout_stage_metrics(
 class GFlowNetTrainIterationResult:
     metrics: dict[str, Any]
     diagnostic_metrics: dict[str, Any] | None = None
+    categorized_diagnostic_metrics: dict[str, dict[str, Any]] | None = None
     trajectory_preview: dict[str, Any] | None = None
 
 

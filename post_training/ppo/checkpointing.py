@@ -46,11 +46,29 @@ def append_optimizer_step_metrics(
     return diagnostics_path
 
 
+def append_optimizer_step_metrics_categorized(
+    output_dir: str | Path,
+    metrics: Sequence[dict[str, Any]],
+) -> Path:
+    diagnostics_path = Path(output_dir) / "diagnostics" / "optimizer_step_metrics_categorized.jsonl"
+    _append_jsonl(diagnostics_path, metrics)
+    return diagnostics_path
+
+
 def append_iteration_diagnostics(
     output_dir: str | Path,
     metrics: Sequence[dict[str, Any]],
 ) -> Path:
     diagnostics_path = Path(output_dir) / "diagnostics" / "iteration_diagnostics.jsonl"
+    _append_jsonl(diagnostics_path, metrics)
+    return diagnostics_path
+
+
+def append_iteration_diagnostics_categorized(
+    output_dir: str | Path,
+    metrics: Sequence[dict[str, Any]],
+) -> Path:
+    diagnostics_path = Path(output_dir) / "diagnostics" / "iteration_diagnostics_categorized.jsonl"
     _append_jsonl(diagnostics_path, metrics)
     return diagnostics_path
 
