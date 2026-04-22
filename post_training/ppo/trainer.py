@@ -628,6 +628,21 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
                     tracker.log_metrics(
                         diagnostic_metrics,
                         step=int(diagnostic_metrics["optimizer_step"]),
+                        prefix="ppo_diagnostics",
+                    )
+                    for prefix, payload in iter_categorized_tracker_payloads(
+                        diagnostic_metrics,
+                        base_prefix="ppo_diagnostics",
+                        metadata_keys=("optimizer_step", "ppo_iteration"),
+                    ):
+                        tracker.log_metrics(
+                            payload,
+                            step=int(diagnostic_metrics["optimizer_step"]),
+                            prefix=prefix,
+                        )
+                    tracker.log_metrics(
+                        diagnostic_metrics,
+                        step=int(diagnostic_metrics["optimizer_step"]),
                         prefix="ppo_optimizer",
                     )
                     for prefix, payload in iter_categorized_tracker_payloads(

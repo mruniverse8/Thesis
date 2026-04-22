@@ -998,39 +998,61 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
     assert summary["num_iterations"] == 1
     headline_calls = [payload for payload, _, prefix in tracker.metric_calls if prefix == "ppo"]
     diagnostic_calls = [
-        payload for payload, _, prefix in tracker.metric_calls if prefix == "ppo_diagnostics"
+        (payload, step) for payload, step, prefix in tracker.metric_calls if prefix == "ppo_diagnostics"
     ]
     optimizer_calls = [
-        payload for payload, _, prefix in tracker.metric_calls if prefix == "ppo_optimizer"
+        (payload, step) for payload, step, prefix in tracker.metric_calls if prefix == "ppo_optimizer"
     ]
     categorized_diagnostic_calls = {
-        prefix: payload
-        for payload, _, prefix in tracker.metric_calls
+        (prefix, step): payload
+        for payload, step, prefix in tracker.metric_calls
         if prefix.startswith("ppo_diagnostics_")
     }
     categorized_optimizer_calls = {
-        prefix: payload
-        for payload, _, prefix in tracker.metric_calls
+        (prefix, step): payload
+        for payload, step, prefix in tracker.metric_calls
         if prefix.startswith("ppo_optimizer_")
     }
     assert headline_calls
     assert "mean_realized_stage_count" not in headline_calls[0]
     assert diagnostic_calls == [
-        {
-            "iteration": 1.0,
-            "mean_realized_stage_count": 1.5,
-            "fraction_rollouts_reaching_stage_2": 0.5,
-        }
+        (
+            {
+                "iteration": 1.0,
+                "mean_realized_stage_count": 1.5,
+                "fraction_rollouts_reaching_stage_2": 0.5,
+            },
+            1,
+        ),
+        (
+            {
+                "optimizer_step": 25,
+                "ppo_iteration": 1,
+                "mini_batch_size": 4,
+                "policy_loss": 0.3,
+                "value_loss": 0.4,
+                "total_loss": 0.5,
+                "entropy_bonus": 0.2,
+                "approx_kl_mean": 0.1,
+                "ratio_mean": 1.0,
+                "ratio_std": 0.05,
+                "clip_fraction": 0.0,
+                "batch_advantage_mean": 0.0,
+                "batch_advantage_std": 1.0,
+                "batch_return_mean": 1.5,
+                "new_value_mean": 1.2,
+                "grad_norm": 0.9,
+                "all_finite": True,
+            },
+            25,
+        ),
     ]
     assert categorized_diagnostic_calls == {
-        "ppo_diagnostics_stage_rollout": {
+        ("ppo_diagnostics_stage_rollout", 1): {
             "mean_realized_stage_count": 1.5,
             "fraction_rollouts_reaching_stage_2": 0.5,
-        }
-    }
-    assert optimizer_calls
-    assert categorized_optimizer_calls == {
-        "ppo_optimizer_optimizer": {
+        },
+        ("ppo_diagnostics_optimizer", 25): {
             "mini_batch_size": 4,
             "policy_loss": 0.3,
             "value_loss": 0.4,
@@ -1045,7 +1067,52 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
             "batch_return_mean": 1.5,
             "new_value_mean": 1.2,
         },
-        "ppo_optimizer_numerics": {
+        ("ppo_diagnostics_numerics", 25): {
+            "grad_norm": 0.9,
+            "all_finite": True,
+        },
+    }
+    assert optimizer_calls == [
+        (
+            {
+                "optimizer_step": 25,
+                "ppo_iteration": 1,
+                "mini_batch_size": 4,
+                "policy_loss": 0.3,
+                "value_loss": 0.4,
+                "total_loss": 0.5,
+                "entropy_bonus": 0.2,
+                "approx_kl_mean": 0.1,
+                "ratio_mean": 1.0,
+                "ratio_std": 0.05,
+                "clip_fraction": 0.0,
+                "batch_advantage_mean": 0.0,
+                "batch_advantage_std": 1.0,
+                "batch_return_mean": 1.5,
+                "new_value_mean": 1.2,
+                "grad_norm": 0.9,
+                "all_finite": True,
+            },
+            25,
+        )
+    ]
+    assert categorized_optimizer_calls == {
+        ("ppo_optimizer_optimizer", 25): {
+            "mini_batch_size": 4,
+            "policy_loss": 0.3,
+            "value_loss": 0.4,
+            "total_loss": 0.5,
+            "entropy_bonus": 0.2,
+            "approx_kl_mean": 0.1,
+            "ratio_mean": 1.0,
+            "ratio_std": 0.05,
+            "clip_fraction": 0.0,
+            "batch_advantage_mean": 0.0,
+            "batch_advantage_std": 1.0,
+            "batch_return_mean": 1.5,
+            "new_value_mean": 1.2,
+        },
+        ("ppo_optimizer_numerics", 25): {
             "grad_norm": 0.9,
             "all_finite": True,
         },
