@@ -10,9 +10,13 @@ DEFAULT_MATCH_ALPHA = 0.5
 DEFAULT_DIVERSITY_BETA = 1.0
 CHEBI20_DIVERSITY_BETA = 2.0
 
+DEFAULT_PLUS_VALID = 0.8
+DEFAULT_REWARD_VARIANT = "reward_var2"
+
 DEFAULT_MATCH_WEIGHT = 1.0
 DEFAULT_DIVERSITY_WEIGHT = 1.0
 DEFAULT_REWARD_AMPLIFICATION = 8.0
+DEFAULT_DUPLICATE_PENALTY_FACTOR = 1.0
 
 DEFAULT_ACCEPTANCE_DICE_THRESHOLD = 0.7
 DEFAULT_ACCEPTANCE_TANIMOTO_THRESHOLD = 0.6
@@ -23,12 +27,23 @@ class RewardConfig:
     fingerprint_radius: int = DEFAULT_FINGERPRINT_RADIUS
     fingerprint_num_bits: int = DEFAULT_FINGERPRINT_NUM_BITS
     match_alpha: float = DEFAULT_MATCH_ALPHA
+    plus_valid: float = DEFAULT_PLUS_VALID
+    reward_variant: str = DEFAULT_REWARD_VARIANT
     diversity_beta: float = DEFAULT_DIVERSITY_BETA
     match_weight: float = DEFAULT_MATCH_WEIGHT
     diversity_weight: float = DEFAULT_DIVERSITY_WEIGHT
     reward_amplification: float = DEFAULT_REWARD_AMPLIFICATION
+    duplicate_penalty_factor: float = DEFAULT_DUPLICATE_PENALTY_FACTOR
     acceptance_dice_threshold: float = DEFAULT_ACCEPTANCE_DICE_THRESHOLD
     acceptance_tanimoto_threshold: float = DEFAULT_ACCEPTANCE_TANIMOTO_THRESHOLD
+
+    def __post_init__(self) -> None:
+        if self.reward_variant not in {"reward_var1", "reward_var2", "reward_var3"}:
+            raise ValueError(
+                "reward_variant must be one of {'reward_var1', 'reward_var2', 'reward_var3'}."
+            )
+        if not 0.0 <= float(self.duplicate_penalty_factor) <= 1.0:
+            raise ValueError("duplicate_penalty_factor must be within [0.0, 1.0].")
 
 
 DEFAULT_REWARD_CONFIG = RewardConfig()
@@ -54,12 +69,15 @@ __all__ = [
     "DEFAULT_ACCEPTANCE_TANIMOTO_THRESHOLD",
     "DEFAULT_DIVERSITY_BETA",
     "DEFAULT_DIVERSITY_WEIGHT",
+    "DEFAULT_DUPLICATE_PENALTY_FACTOR",
     "DEFAULT_FINGERPRINT_NUM_BITS",
     "DEFAULT_FINGERPRINT_RADIUS",
     "DEFAULT_MATCH_ALPHA",
     "DEFAULT_MATCH_WEIGHT",
+    "DEFAULT_PLUS_VALID",
     "DEFAULT_REWARD_AMPLIFICATION",
     "DEFAULT_REWARD_CONFIG",
+    "DEFAULT_REWARD_VARIANT",
     "PPO_DEFAULTS",
     "RewardConfig",
 ]

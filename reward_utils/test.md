@@ -139,6 +139,6 @@ When the full 10-idea suite passes, you can be confident that:
 - parsing works for SMILES, SELFIES, and auto-detected SELFIES
 - cross-representation equivalence is preserved after canonicalization
 - reward functions can compare SELFIES candidates against SMILES targets and previous molecules
-- duplicates reduce diversity reward as expected
+- `reward_var1` keeps the duplicate-driven diversity penalty, `reward_var2` still reports duplicates without using diversity in the scalar reward, and `reward_var3` combines match, diversity, and the valid-candidate bonus
 - invalid molecules collapse to zero reward instead of producing undefined behavior
 - repeated scoring of the same curated set is deterministic

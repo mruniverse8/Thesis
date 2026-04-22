@@ -10,7 +10,9 @@ from molecules.defaults import (
     DEFAULT_FINGERPRINT_RADIUS,
     DEFAULT_MATCH_ALPHA,
     DEFAULT_MATCH_WEIGHT,
+    DEFAULT_PLUS_VALID,
     DEFAULT_REWARD_AMPLIFICATION,
+    DEFAULT_REWARD_VARIANT,
     RewardConfig,
 )
 from molecules.fingerprints import ensure_molecule_record
@@ -90,6 +92,28 @@ def _compute_component(
     )
 
 
+def _zero_reward_component(*, exponent: float, num_references: int) -> RewardComponent:
+    return RewardComponent(
+        reward=0.0,
+        max_similarity=0.0,
+        exponent=exponent,
+        best_index=None,
+        best_reference=None,
+        num_references=num_references,
+    )
+
+
+def _apply_duplicate_penalty(
+    total_reward: float,
+    *,
+    is_duplicate: bool,
+    duplicate_penalty_factor: float,
+) -> float:
+    if not is_duplicate:
+        return total_reward
+    return total_reward * duplicate_penalty_factor
+
+
 def compute_rmatch(
     candidate: MoleculeRecord | object | str,
     targets: Sequence[MoleculeRecord | object | str],
@@ -162,6 +186,127 @@ def compute_rdiv(
     )
 
 
+def _compute_total_reward_var1(
+    candidate_record: MoleculeRecord,
+    target_records: Sequence[MoleculeRecord],
+    previous_records: Sequence[MoleculeRecord],
+    *,
+    is_duplicate: bool,
+    reward_config: RewardConfig,
+    match_weight: float,
+    diversity_weight: float,
+    reward_amplification: float,
+) -> RewardBreakdown:
+    match_component = compute_rmatch(
+        candidate_record,
+        target_records,
+        alpha=reward_config.match_alpha,
+        radius=reward_config.fingerprint_radius,
+        n_bits=reward_config.fingerprint_num_bits,
+    )
+    diversity_component = compute_rdiv(
+        candidate_record,
+        previous_records,
+        beta=reward_config.diversity_beta,
+        radius=reward_config.fingerprint_radius,
+        n_bits=reward_config.fingerprint_num_bits,
+    )
+    total_reward = match_weight * match_component.reward + diversity_weight * diversity_component.reward
+    return RewardBreakdown(
+        candidate=candidate_record,
+        match=match_component,
+        diversity=diversity_component,
+        total_reward=total_reward,
+        amplified_reward=reward_amplification * total_reward,
+        match_weight=match_weight,
+        diversity_weight=diversity_weight,
+        is_duplicate=is_duplicate,
+    )
+
+
+def _compute_total_reward_var2(
+    candidate_record: MoleculeRecord,
+    target_records: Sequence[MoleculeRecord],
+    previous_records: Sequence[MoleculeRecord],
+    *,
+    is_duplicate: bool,
+    reward_config: RewardConfig,
+    plus_valid: float,
+    duplicate_penalty_factor: float,
+    reward_amplification: float,
+) -> RewardBreakdown:
+    match_component = compute_rmatch(
+        candidate_record,
+        target_records,
+        alpha=reward_config.match_alpha,
+        radius=reward_config.fingerprint_radius,
+        n_bits=reward_config.fingerprint_num_bits,
+    )
+    diversity_component = _zero_reward_component(
+        exponent=reward_config.diversity_beta,
+        num_references=len(previous_records),
+    )
+    total_reward = match_component.reward + (plus_valid if candidate_record.is_valid else 0.0)
+    total_reward = _apply_duplicate_penalty(
+        total_reward,
+        is_duplicate=is_duplicate,
+        duplicate_penalty_factor=duplicate_penalty_factor,
+    )
+    return RewardBreakdown(
+        candidate=candidate_record,
+        match=match_component,
+        diversity=diversity_component,
+        total_reward=total_reward,
+        amplified_reward=reward_amplification * total_reward,
+        match_weight=1.0,
+        diversity_weight=0.0,
+        is_duplicate=is_duplicate,
+    )
+
+
+def _compute_total_reward_var3(
+    candidate_record: MoleculeRecord,
+    target_records: Sequence[MoleculeRecord],
+    previous_records: Sequence[MoleculeRecord],
+    *,
+    is_duplicate: bool,
+    reward_config: RewardConfig,
+    plus_valid: float,
+    match_weight: float,
+    diversity_weight: float,
+    reward_amplification: float,
+) -> RewardBreakdown:
+    match_component = compute_rmatch(
+        candidate_record,
+        target_records,
+        alpha=reward_config.match_alpha,
+        radius=reward_config.fingerprint_radius,
+        n_bits=reward_config.fingerprint_num_bits,
+    )
+    diversity_component = compute_rdiv(
+        candidate_record,
+        previous_records,
+        beta=reward_config.diversity_beta,
+        radius=reward_config.fingerprint_radius,
+        n_bits=reward_config.fingerprint_num_bits,
+    )
+    total_reward = (
+        match_weight * match_component.reward
+        + diversity_weight * diversity_component.reward
+        + (plus_valid if candidate_record.is_valid else 0.0)
+    )
+    return RewardBreakdown(
+        candidate=candidate_record,
+        match=match_component,
+        diversity=diversity_component,
+        total_reward=total_reward,
+        amplified_reward=reward_amplification * total_reward,
+        match_weight=match_weight,
+        diversity_weight=diversity_weight,
+        is_duplicate=is_duplicate,
+    )
+
+
 def compute_total_reward(
     candidate: MoleculeRecord | object | str,
     targets: Sequence[MoleculeRecord | object | str],
@@ -183,36 +328,46 @@ def compute_total_reward(
     effective_match_weight = reward_config.match_weight if config else match_weight
     effective_diversity_weight = reward_config.diversity_weight if config else diversity_weight
     effective_amplification = reward_config.reward_amplification if config else reward_amplification
+    effective_plus_valid = reward_config.plus_valid if config else DEFAULT_PLUS_VALID
+    effective_variant = reward_config.reward_variant if config else DEFAULT_REWARD_VARIANT
+    effective_duplicate_penalty_factor = reward_config.duplicate_penalty_factor
+    is_duplicate = is_duplicate_candidate(candidate_record, list(previous_records))
 
-    match_component = compute_rmatch(
-        candidate_record,
-        target_records,
-        alpha=reward_config.match_alpha,
-        radius=reward_config.fingerprint_radius,
-        n_bits=reward_config.fingerprint_num_bits,
-    )
-    diversity_component = compute_rdiv(
-        candidate_record,
-        previous_records,
-        beta=reward_config.diversity_beta,
-        radius=reward_config.fingerprint_radius,
-        n_bits=reward_config.fingerprint_num_bits,
-    )
-
-    total_reward = (
-        effective_match_weight * match_component.reward
-        + effective_diversity_weight * diversity_component.reward
-    )
-    return RewardBreakdown(
-        candidate=candidate_record,
-        match=match_component,
-        diversity=diversity_component,
-        total_reward=total_reward,
-        amplified_reward=effective_amplification * total_reward,
-        match_weight=effective_match_weight,
-        diversity_weight=effective_diversity_weight,
-        is_duplicate=is_duplicate_candidate(candidate_record, previous_records),
-    )
+    if effective_variant == "reward_var1":
+        return _compute_total_reward_var1(
+            candidate_record,
+            target_records,
+            previous_records,
+            is_duplicate=is_duplicate,
+            reward_config=reward_config,
+            match_weight=effective_match_weight,
+            diversity_weight=effective_diversity_weight,
+            reward_amplification=effective_amplification,
+        )
+    if effective_variant == "reward_var2":
+        return _compute_total_reward_var2(
+            candidate_record,
+            target_records,
+            previous_records,
+            is_duplicate=is_duplicate,
+            reward_config=reward_config,
+            plus_valid=effective_plus_valid,
+            duplicate_penalty_factor=effective_duplicate_penalty_factor,
+            reward_amplification=effective_amplification,
+        )
+    if effective_variant == "reward_var3":
+        return _compute_total_reward_var3(
+            candidate_record,
+            target_records,
+            previous_records,
+            is_duplicate=is_duplicate,
+            reward_config=reward_config,
+            plus_valid=effective_plus_valid,
+            match_weight=effective_match_weight,
+            diversity_weight=effective_diversity_weight,
+            reward_amplification=effective_amplification,
+        )
+    raise ValueError(f"Unsupported reward variant: {effective_variant}")
 
 
 def score_candidate_sequence(

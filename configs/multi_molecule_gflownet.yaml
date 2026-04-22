@@ -31,10 +31,13 @@ reward:
   fingerprint_radius: 2
   fingerprint_num_bits: 2048
   match_alpha: 0.5
+  reward_variant: reward_var2
+  plus_valid: 0.8
   diversity_beta: 1.0
   match_weight: 1.0
   diversity_weight: 1.0
   reward_amplification: 8.0
+  duplicate_penalty_factor: 0.1
   acceptance_dice_threshold: 0.7
   acceptance_tanimoto_threshold: 0.6
 

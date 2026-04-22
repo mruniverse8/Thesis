@@ -11,10 +11,17 @@ This workspace isolates the reward logic needed to reproduce the reinforcement-l
 
 - arXiv `2410.03138v2`
 
-The implementation target follows the `v2` reward design in Appendix B.2:
+The reward module now supports three configurable variants:
 
-- `rmatch(m_k, p_desc) = max_{m in M_D(p_desc)} D(m, m_k)^alpha`
-- `rdiv(m_k, {m_i}_{i=1}^{k-1}) = 1 - max_{m in {m_i}_{i=1}^{k-1}} T(m_k, m)^beta`
+- `reward_var1` keeps the `v2` Appendix B.2 design:
+  `rmatch(m_k, p_desc) = max_{m in M_D(p_desc)} D(m, m_k)^alpha`
+  `rdiv(m_k, {m_i}_{i=1}^{k-1}) = 1 - max_{m in {m_i}_{i=1}^{k-1}} T(m_k, m)^beta`
+- `reward_var2` is the default:
+  `total_reward = rmatch + plus_valid` for valid candidates
+  `total_reward = rmatch` for invalid candidates
+- `reward_var3` combines both:
+  `total_reward = match_weight * rmatch + diversity_weight * rdiv + plus_valid` for valid candidates
+  `total_reward = match_weight * rmatch + diversity_weight * rdiv` for invalid candidates
 
 where:
 
@@ -60,6 +67,8 @@ Compatibility wrappers retained here:
 - fingerprint radius: `2`
 - fingerprint bits: `2048`
 - `alpha = 0.5`
+- `plus_valid = 0.8`
+- default reward variant: `reward_var2`
 - `beta = 1.0`
 - ChEBI-20 override: `beta = 2.0`
 - reward amplification: `8.0`
@@ -79,5 +88,7 @@ PPO-side reference hyperparameters captured here for later integration:
 
 - `score_candidate_sequence(...)` is the intended bridge into future PPO code.
 - Invalid molecules yield zero reward rather than raising.
-- Duplicate molecules are surfaced explicitly in the reward breakdown and naturally collapse `rdiv` toward `0` through Tanimoto similarity.
+- `reward_var1` remains available for ablations that need the legacy match-plus-diversity formula.
+- `reward_var3` is available when you want diversity pressure without dropping the validity bonus.
+- Duplicate molecules are still surfaced explicitly in the reward breakdown even when the active reward variant does not penalize them.
 - This workspace does not yet modify `src/training.py`; it is intentionally isolated until PPO integration begins.

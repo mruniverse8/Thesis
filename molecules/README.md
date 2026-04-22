@@ -40,7 +40,7 @@ Canonical home for molecule- and chemistry-specific code in this repo.
 ### PPO reward scoring
 
 1. Post-training rollout code samples one SELFIES candidate at a stage.
-2. `molecules.rewards.scoring.compute_total_reward(...)` computes match and diversity rewards.
+2. `molecules.rewards.scoring.compute_total_reward(...)` dispatches between `reward_var1`, the default `reward_var2` match-plus-validity-bonus reward, and `reward_var3` which combines match, diversity, and the validity bonus.
 3. Reward breakdown is attached to the stage trajectory used by PPO.
 
 ## Running
