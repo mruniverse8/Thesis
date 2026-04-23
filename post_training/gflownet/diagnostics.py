@@ -326,9 +326,12 @@ def build_trajectory_preview_payload(
     preview_candidates: list[dict[str, Any]] = []
     for rollout in grouped_trajectories.values():
         ordered_rollout = sorted(rollout, key=lambda trajectory: trajectory.stage_index)
-        cleanup_results = [
-            _cleanup_decode_stage_text(str(trajectory.stage_text))
+        raw_stage_texts = [
+            str(trajectory.metadata.get("raw_stage_text", trajectory.stage_text))
             for trajectory in ordered_rollout
+        ]
+        cleanup_results = [
+            _cleanup_decode_stage_text(raw_stage_text) for raw_stage_text in raw_stage_texts
         ]
         preview_candidates.append(
             {
@@ -346,9 +349,7 @@ def build_trajectory_preview_payload(
                 "generated_selfies_sequence": [
                     trajectory.sampled_selfies for trajectory in ordered_rollout
                 ],
-                "raw_stage_text_sequence": [
-                    str(trajectory.stage_text) for trajectory in ordered_rollout
-                ],
+                "raw_stage_text_sequence": raw_stage_texts,
                 "cleanup_selected_selfies_sequence": [
                     result.get("selected_selfies") for result in cleanup_results
                 ],

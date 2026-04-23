@@ -13,7 +13,7 @@ from post_training.shared.decoding import (
     mask_logits_to_allowed_token_ids,
     resolve_stage_token_constraints,
 )
-from post_training.shared.sequence import build_stage_prefix, parse_single_staged_molecule
+from post_training.shared.sequence import build_stage_prefix, project_sampled_stage_to_no_h
 
 from .config import RolloutGenerationConfig, StageTrajectory
 from .model import PolicyValueModel
@@ -172,14 +172,13 @@ def sample_stage(
     generation_config: RolloutGenerationConfig,
     stage_token_constraints: StageTokenConstraints | None = None,
 ) -> dict[str, Any]:
-    device = input_ids.device
     eom_token_id = tokenizer.convert_tokens_to_ids(EOM_TOKEN)
     resolved_constraints = resolve_stage_token_constraints(policy_model, stage_token_constraints)
 
     current_decoder_input_ids = decoder_prefix_ids.clone()
-    action_token_ids: list[int] = []
-    total_logprob = 0.0
-    total_entropy = 0.0
+    raw_action_token_ids: list[int] = []
+    raw_total_logprob = 0.0
+    raw_total_entropy = 0.0
     stop_token: str | None = None
     termination_reason = "max_stage_new_tokens"
 
@@ -201,13 +200,13 @@ def sample_stage(
                 next_logits,
                 temperature=generation_config.temperature,
                 top_p=generation_config.top_p,
-                action_token_ids=tuple(action_token_ids),
+                action_token_ids=tuple(raw_action_token_ids),
                 stage_token_constraints=resolved_constraints,
             )
             next_token_id = int(next_token.item())
-            action_token_ids.append(next_token_id)
-            total_logprob += float(next_log_prob.item())
-            total_entropy += float(entropy.item())
+            raw_action_token_ids.append(next_token_id)
+            raw_total_logprob += float(next_log_prob.item())
+            raw_total_entropy += float(entropy.item())
 
             current_decoder_input_ids = torch.cat([current_decoder_input_ids, next_token], dim=1)
 
@@ -216,23 +215,42 @@ def sample_stage(
                 termination_reason = "stop_token"
                 break
 
-    stage_text = ""
-    if action_token_ids:
-        stage_text = tokenizer.decode(
-            action_token_ids,
+    raw_stage_text = ""
+    if raw_action_token_ids:
+        raw_stage_text = tokenizer.decode(
+            raw_action_token_ids,
             skip_special_tokens=False,
             clean_up_tokenization_spaces=True,
         ).strip()
 
-    sampled_selfies = parse_single_staged_molecule(stage_text)
+    projection = project_sampled_stage_to_no_h(tokenizer, raw_stage_text)
+    with torch.no_grad():
+        projected_logprob_sum, projected_entropy_sum = compute_action_stats(
+            policy_model,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            decoder_input_ids=decoder_prefix_ids,
+            action_token_ids=projection.action_token_ids,
+            stage_token_constraints=resolved_constraints,
+        )
+
+    metadata = dict(projection.metadata)
+    metadata.update(
+        {
+            "raw_action_token_ids": tuple(raw_action_token_ids),
+            "raw_action_logprob_sum": raw_total_logprob,
+            "raw_entropy_sum": raw_total_entropy,
+        }
+    )
     return {
-        "stage_text": stage_text,
-        "sampled_selfies": sampled_selfies,
-        "action_token_ids": action_token_ids,
-        "action_logprob_sum": total_logprob,
-        "entropy_sum": total_entropy,
+        "stage_text": projection.stage_text,
+        "sampled_selfies": projection.sampled_selfies,
+        "action_token_ids": list(projection.action_token_ids),
+        "action_logprob_sum": float(projected_logprob_sum.item()),
+        "entropy_sum": float(projected_entropy_sum.item()),
         "stop_token": stop_token,
         "termination_reason": termination_reason,
+        "metadata": metadata,
     }
 
 
@@ -333,6 +351,7 @@ def sample_rollout_for_example(
             entropy_sum_old=float(stage_sample["entropy_sum"]),
             is_valid=reward_breakdown.candidate.is_valid,
             is_duplicate=reward_breakdown.is_duplicate,
+            metadata=dict(stage_sample.get("metadata", {})),
         )
         trajectories.append(trajectory)
 

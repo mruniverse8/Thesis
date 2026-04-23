@@ -185,6 +185,30 @@ class DummyTokenizer:
         self.id_to_token = dict(id_to_token)
         self.token_to_id = dict(token_to_id)
 
+    def __call__(
+        self,
+        text: str,
+        add_special_tokens: bool = False,
+        return_attention_mask: bool = False,
+        return_tensors: str | None = None,
+    ):
+        del add_special_tokens, return_attention_mask
+        remaining = str(text)
+        token_ids: list[int] = []
+        known_tokens = sorted(self.token_to_id, key=len, reverse=True)
+        while remaining:
+            matched_token = next(
+                (token for token in known_tokens if remaining.startswith(token)),
+                None,
+            )
+            if matched_token is None:
+                raise ValueError(f"Unable to tokenize {text!r}; next chunk was {remaining!r}.")
+            token_ids.append(int(self.token_to_id[matched_token]))
+            remaining = remaining[len(matched_token) :]
+        if return_tensors == "pt":
+            return {"input_ids": torch.tensor([token_ids], dtype=torch.long)}
+        return {"input_ids": token_ids}
+
     def decode(self, token_ids, skip_special_tokens=False, clean_up_tokenization_spaces=True):
         del skip_special_tokens, clean_up_tokenization_spaces
         return "".join(self.id_to_token[int(token_id)] for token_id in token_ids)
@@ -201,7 +225,12 @@ def test_sample_stage_enforces_bom_and_masks_language_tokens() -> None:
             3: "<eom>",
             4: "ordinary",
         },
-        {EOM_TOKEN: 3},
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+            "ordinary": 4,
+        },
     )
     token_constraints = StageTokenConstraints(
         bom_token_id=1,
@@ -254,3 +283,84 @@ def test_sample_stage_enforces_bom_and_masks_language_tokens() -> None:
     assert stage_sample["termination_reason"] == "stop_token"
     assert stage_sample["stage_text"] == "<bom>[C]<eom>"
     assert stage_sample["sampled_selfies"] == "[C]"
+    assert stage_sample["metadata"]["projection_applied"] is True
+    assert stage_sample["metadata"]["projection_failure_reason"] is None
+    assert stage_sample["metadata"]["raw_action_token_ids"] == (1, 2, 3)
+
+
+def test_sample_stage_projects_explicit_hydrogens_to_no_h_action_ids() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[CH",
+            3: "4]",
+            4: "<eom>",
+            5: "[C]",
+            6: "ordinary",
+        },
+        {
+            "<bom>": 1,
+            "[CH": 2,
+            "4]": 3,
+            EOM_TOKEN: 4,
+            "[C]": 5,
+            "ordinary": 6,
+        },
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=4,
+        content_token_ids=(2, 3, 5),
+    )
+
+    class DummyPolicyModel:
+        def __init__(self) -> None:
+            self.policy_model = self
+            self._stage_token_constraints = token_constraints
+
+        def get_stage_token_constraints(self):
+            return self._stage_token_constraints
+
+        def __call__(
+            self,
+            *,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            decoder_input_ids: torch.Tensor,
+            return_dict: bool,
+        ) -> SimpleNamespace:
+            del input_ids, attention_mask, return_dict
+            logits = torch.full((1, decoder_input_ids.size(1), 12), -20.0)
+            current_length = decoder_input_ids.size(1)
+            if current_length == 1:
+                logits[:, -1, 1] = 0.0
+            elif current_length == 2:
+                logits[:, -1, 2] = 0.0
+            elif current_length == 3:
+                logits[:, -1, 3] = 0.0
+            else:
+                logits[:, -1, 4] = 6.0
+                logits[:, -1, 5] = 0.0
+            return SimpleNamespace(logits=logits)
+
+    stage_sample = sample_stage(
+        DummyPolicyModel(),
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=RolloutGenerationConfig(max_stage_new_tokens=5),
+    )
+
+    assert stage_sample["stage_text"] == "<bom>[C]<eom>"
+    assert stage_sample["sampled_selfies"] == "[C]"
+    assert stage_sample["action_token_ids"] == [1, 5, 4]
+    assert stage_sample["stop_token"] == EOM_TOKEN
+    assert stage_sample["termination_reason"] == "stop_token"
+    assert stage_sample["metadata"]["raw_stage_text"] == "<bom>[CH4]<eom>"
+    assert stage_sample["metadata"]["raw_sampled_selfies"] == "[CH4]"
+    assert stage_sample["metadata"]["raw_action_token_ids"] == (1, 2, 3, 4)
+    assert stage_sample["metadata"]["projection_applied"] is True
+    assert stage_sample["metadata"]["projection_changed"] is True
+    assert stage_sample["metadata"]["projection_failure_reason"] is None
+    assert len(stage_sample["metadata"]["raw_action_token_ids"]) > len(stage_sample["action_token_ids"])

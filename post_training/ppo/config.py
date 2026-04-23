@@ -232,6 +232,7 @@ class StageTrajectory:
     entropy_sum_old: float
     is_valid: bool
     is_duplicate: bool
+    metadata: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         breakdown = self.reward_breakdown
@@ -255,6 +256,7 @@ class StageTrajectory:
             "entropy_sum_old": self.entropy_sum_old,
             "is_valid": self.is_valid,
             "is_duplicate": self.is_duplicate,
+            "metadata": dict(self.metadata),
             "reward_breakdown": {
                 "candidate": breakdown.candidate.canonical_smiles,
                 "match_reward": breakdown.match.reward,

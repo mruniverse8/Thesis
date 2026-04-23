@@ -246,7 +246,8 @@ def build_trajectory_preview_payload(
                     trajectory.sampled_selfies for trajectory in ordered_rollout
                 ],
                 "raw_stage_text_sequence": [
-                    str(trajectory.stage_text) for trajectory in ordered_rollout
+                    str(trajectory.metadata.get("raw_stage_text", trajectory.stage_text))
+                    for trajectory in ordered_rollout
                 ],
                 "valid_sequence": [bool(trajectory.is_valid) for trajectory in ordered_rollout],
                 "duplicate_sequence": [

@@ -13,7 +13,7 @@ from post_training.shared.decoding import (
     mask_logits_to_allowed_token_ids,
     resolve_stage_token_constraints,
 )
-from post_training.shared.sequence import build_stage_prefix, parse_single_staged_molecule
+from post_training.shared.sequence import build_stage_prefix, project_sampled_stage_to_no_h
 
 from .config import GFlowNetRolloutConfig
 from .model import GFlowNetModel
@@ -104,8 +104,10 @@ def build_sampled_stage_trajectory_from_generation(
     stage_index: int,
     decoder_prefix_text: str,
     previous_valid_selfies: Sequence[str],
-    tokenizer: PreTrainedTokenizerBase,
+    stage_text: str,
+    sampled_selfies: str | None,
     action_token_ids: Sequence[int],
+    metadata: dict[str, Any] | None,
     stop_token: str | None,
     termination_reason: str,
     reward_config: RewardConfig | None,
@@ -115,21 +117,6 @@ def build_sampled_stage_trajectory_from_generation(
     description = str(example["description"])
     target_selfies_list = tuple(str(item) for item in example["target_selfies_list"])
 
-    stage_token_ids = list(int(token_id) for token_id in action_token_ids)
-    if stop_token == EOM_TOKEN:
-        eom_token_id = tokenizer.convert_tokens_to_ids(EOM_TOKEN)
-        stage_token_ids.append(int(eom_token_id))
-
-    stage_text = (
-        tokenizer.decode(
-            stage_token_ids,
-            skip_special_tokens=False,
-            clean_up_tokenization_spaces=True,
-        ).strip()
-        if stage_token_ids
-        else ""
-    )
-    sampled_selfies = parse_single_staged_molecule(stage_text)
     reward_summary = score_stage_terminal_reward(
         sampled_selfies,
         targets=target_selfies_list,
@@ -158,6 +145,7 @@ def build_sampled_stage_trajectory_from_generation(
         is_valid=reward_summary.is_valid_terminal,
         is_duplicate=reward_summary.is_duplicate_terminal,
         metadata={
+            **dict(metadata or {}),
             "num_actions": len(action_token_ids),
             "stop_action_token": EOM_TOKEN,
         },
@@ -174,13 +162,12 @@ def sample_stage(
     generation_config: GFlowNetRolloutConfig,
     stage_token_constraints: StageTokenConstraints | None = None,
 ) -> dict[str, Any]:
-    device = input_ids.device
     eom_token_id = tokenizer.convert_tokens_to_ids(EOM_TOKEN)
     eos_token_id = model.policy_model.config.eos_token_id
     resolved_constraints = resolve_stage_token_constraints(model, stage_token_constraints)
 
     current_decoder_input_ids = decoder_prefix_ids.clone()
-    action_token_ids: list[int] = []
+    raw_action_token_ids: list[int] = []
     stop_token: str | None = None
     termination_reason = "max_stage_new_tokens"
 
@@ -202,7 +189,7 @@ def sample_stage(
                 next_logits,
                 temperature=generation_config.temperature,
                 top_p=generation_config.top_p,
-                action_token_ids=tuple(action_token_ids),
+                action_token_ids=tuple(raw_action_token_ids),
                 stage_token_constraints=resolved_constraints,
             )
             next_token_id = int(next_token.item())
@@ -217,28 +204,37 @@ def sample_stage(
                 termination_reason = "eos_token"
                 break
 
-            action_token_ids.append(next_token_id)
+            raw_action_token_ids.append(next_token_id)
             current_decoder_input_ids = torch.cat([current_decoder_input_ids, next_token], dim=1)
 
-    stage_token_ids = [*action_token_ids]
+    raw_stage_token_ids = [*raw_action_token_ids]
     if stop_token == EOM_TOKEN:
-        stage_token_ids.append(int(eom_token_id))
-    stage_text = (
+        raw_stage_token_ids.append(int(eom_token_id))
+    raw_stage_text = (
         tokenizer.decode(
-            stage_token_ids,
+            raw_stage_token_ids,
             skip_special_tokens=False,
             clean_up_tokenization_spaces=True,
         ).strip()
-        if stage_token_ids
+        if raw_stage_token_ids
         else ""
+    )
+    projection = project_sampled_stage_to_no_h(
+        tokenizer,
+        raw_stage_text,
+        drop_terminal_eom_from_action_ids=True,
     )
 
     return {
-        "stage_text": stage_text,
-        "sampled_selfies": parse_single_staged_molecule(stage_text),
-        "action_token_ids": tuple(action_token_ids),
+        "stage_text": projection.stage_text,
+        "sampled_selfies": projection.sampled_selfies,
+        "action_token_ids": tuple(projection.action_token_ids),
         "stop_token": stop_token,
         "termination_reason": termination_reason,
+        "metadata": {
+            **projection.metadata,
+            "raw_action_token_ids": tuple(raw_action_token_ids),
+        },
     }
 
 
@@ -295,8 +291,10 @@ def sample_stage_trajectories_for_example(
             stage_index=stage_index,
             decoder_prefix_text=prefix_text,
             previous_valid_selfies=tuple(previous_valid_selfies),
-            tokenizer=tokenizer,
+            stage_text=str(stage_sample["stage_text"]),
+            sampled_selfies=stage_sample["sampled_selfies"],
             action_token_ids=stage_sample["action_token_ids"],
+            metadata=dict(stage_sample.get("metadata", {})),
             stop_token=stage_sample["stop_token"],
             termination_reason=stage_sample["termination_reason"],
             reward_config=reward_config,
