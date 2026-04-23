@@ -75,6 +75,12 @@ def test_ppo_config_from_dict_clamps_epoch_diagnostic_logging_cadence() -> None:
     assert config.diagnostic_log_every_ppo_epochs == 1
 
 
+def test_ppo_config_from_dict_ignores_removed_optimizer_step_diagnostic_cadence() -> None:
+    config = PPOConfig.from_dict({"diagnostic_log_every_optimizer_steps": 99})
+
+    assert not hasattr(config, "diagnostic_log_every_optimizer_steps")
+
+
 def test_ppo_rollout_defaults_enable_constrained_decoding_and_tighter_sampling() -> None:
     config = PPOConfig.from_dict({})
 

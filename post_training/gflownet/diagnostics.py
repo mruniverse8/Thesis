@@ -32,6 +32,7 @@ GFLOWNET_TRACKER_HEADLINE_METRIC_KEYS = frozenset(
         "replay_size",
         "replay_total_action_tokens",
         "rollout_append_probability",
+        "rollout_return_last_trajectory_only",
         "grad_norm",
         "all_finite",
     }

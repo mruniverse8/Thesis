@@ -48,6 +48,55 @@ def _make_sampled_trajectory(
     )
 
 
+@pytest.mark.parametrize(
+    ("objective", "expected_return_last_trajectory_only"),
+    [
+        ("tb", False),
+        ("db", False),
+        ("subtb", True),
+    ],
+)
+def test_collect_on_policy_trajectories_passes_last_only_flag_for_subtb(
+    monkeypatch,
+    objective: str,
+    expected_return_last_trajectory_only: bool,
+) -> None:
+    class DummyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    calls: list[bool] = []
+
+    def fake_sample_stage_trajectories_for_example(*args, **kwargs):
+        del args
+        calls.append(bool(kwargs["return_last_trajectory_only"]))
+        return []
+
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.sample_stage_trajectories_for_example",
+        fake_sample_stage_trajectories_for_example,
+    )
+
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=DummyModel(),
+        tokenizer=None,
+        config=GFlowNetConfig(
+            objective=objective,
+            replay=ReplayConfig(enabled=False),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    trajectories = trainer.collect_on_policy_trajectories(
+        [{"id": "example-1"}],
+        iteration_index=1,
+    )
+
+    assert trajectories == []
+    assert calls == [expected_return_last_trajectory_only]
+
+
 def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     class DummyModel(torch.nn.Module):
         def __init__(self) -> None:
@@ -152,6 +201,7 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     assert metrics["replay_size"] == 5.0
     assert metrics["replay_total_action_tokens"] == 12.0
     assert metrics["rollout_append_probability"] == pytest.approx(0.30)
+    assert metrics["rollout_return_last_trajectory_only"] == pytest.approx(0.0)
     assert metrics["mean_stage_reward"] == pytest.approx((2.0 + 3.0 + 1.0e-4 + 4.0) / 4.0)
     assert metrics["valid_fraction"] == pytest.approx(0.75)
     assert metrics["mean_num_actions"] == pytest.approx(2.5)

@@ -214,6 +214,7 @@ def test_sample_stage_trajectories_for_example_stops_after_invalid_stage_when_co
         generation_config=GFlowNetRolloutConfig(
             max_molecules_per_sequence=2,
             append_probability=1.0,
+            terminate_on_invalid_stage=True,
         ),
         reward_config=CHEBI20_REWARD_CONFIG,
         invalid_terminal_reward=1.0e-4,
@@ -395,6 +396,152 @@ def test_sample_stage_trajectories_for_example_appends_stage_two_plus_only_when_
     assert len(skipped) == 2
     assert [trajectory.stage_index for trajectory in skipped] == [1, 3]
     assert skipped[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]", "[C][C][N]"])
+
+
+def test_sample_stage_trajectories_for_example_can_keep_only_last_generated_stage(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: "<bom>",
+            5: "[C][C][N]",
+            6: "<bom>",
+            7: "[C][O][O]",
+        },
+        {EOM_TOKEN: 3},
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    samples = iter(
+        [
+            {
+                "stage_text": "<bom>[C][C][O]<eom>",
+                "sampled_selfies": "[C][C][O]",
+                "action_token_ids": (1, 2),
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+            },
+            {
+                "stage_text": "<bom>[C][C][N]<eom>",
+                "sampled_selfies": "[C][C][N]",
+                "action_token_ids": (4, 5),
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+            },
+            {
+                "stage_text": "<bom>[C][O][O]<eom>",
+                "sampled_selfies": "[C][O][O]",
+                "action_token_ids": (6, 7),
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+            },
+        ]
+    )
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage", lambda *args, **kwargs: next(samples))
+
+    trajectories = sample_stage_trajectories_for_example(
+        DummyModel(),
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]", "[C][O][O]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=GFlowNetRolloutConfig(
+            max_molecules_per_sequence=3,
+            append_probability=0.0,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandom([]),
+        return_last_trajectory_only=True,
+    )
+
+    assert len(trajectories) == 1
+    assert trajectories[0].stage_index == 3
+    assert trajectories[0].decoder_prefix_text == build_stage_prefix(["[C][C][O]", "[C][C][N]"])
+    assert trajectories[0].previous_sampled_selfies == ("[C][C][O]", "[C][C][N]")
+
+
+def test_sample_stage_trajectories_for_example_last_only_keeps_invalid_final_stage(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: "<bom>",
+            5: "[C][C][N]",
+        },
+        {EOM_TOKEN: 3},
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    samples = iter(
+        [
+            {
+                "stage_text": "<bom>[C][C][O]<eom>",
+                "sampled_selfies": "[C][C][O]",
+                "action_token_ids": (1, 2),
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+            },
+            {
+                "stage_text": "<bom>[C][C][N]",
+                "sampled_selfies": None,
+                "action_token_ids": (4, 5),
+                "stop_token": None,
+                "termination_reason": "max_stage_new_tokens",
+            },
+        ]
+    )
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage", lambda *args, **kwargs: next(samples))
+
+    trajectories = sample_stage_trajectories_for_example(
+        DummyModel(),
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=GFlowNetRolloutConfig(
+            max_molecules_per_sequence=3,
+            append_probability=0.0,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandom([]),
+        return_last_trajectory_only=True,
+    )
+
+    assert [trajectory.stage_index for trajectory in trajectories] == [2]
+    assert trajectories[0].is_valid is False
+    assert trajectories[0].termination_reason == "max_stage_new_tokens"
 
 
 def test_sample_stage_trajectories_for_example_keeps_skipped_early_break_trajectory(

@@ -151,6 +151,7 @@ class MultiMoleculeGFlowNetTrainer:
         iteration_index: int,
     ) -> list[SampledStageTrajectory]:
         trajectories: list[SampledStageTrajectory] = []
+        return_last_trajectory_only = self.config.objective == "subtb"
         for example_index, example in enumerate(examples):
             rollout_id = f"iter-{iteration_index:04d}-sample-{example_index:04d}-{example['id']}"
             trajectories.extend(
@@ -164,6 +165,7 @@ class MultiMoleculeGFlowNetTrainer:
                     invalid_terminal_reward=self.config.invalid_terminal_reward,
                     device=self.device,
                     rng=self.rollout_rng,
+                    return_last_trajectory_only=return_last_trajectory_only,
                 )
             )
         return trajectories
@@ -313,6 +315,7 @@ class MultiMoleculeGFlowNetTrainer:
                     self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0
                 ),
                 "rollout_append_probability": float(self.config.rollout.append_probability),
+                "rollout_return_last_trajectory_only": float(self.config.objective == "subtb"),
                 "sampling_duration_sec": sampling_duration_sec,
                 "replay_sampling_duration_sec": 0.0,
                 "scoring_duration_sec": 0.0,
@@ -467,6 +470,7 @@ class MultiMoleculeGFlowNetTrainer:
                 self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0
             ),
             "rollout_append_probability": float(self.config.rollout.append_probability),
+            "rollout_return_last_trajectory_only": float(self.config.objective == "subtb"),
             "grad_norm": float(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm),
             "mean_log_pf_token": _tensor_mean(all_log_pf_tokens),
             "mean_log_pb_token": _tensor_mean(all_log_pb_tokens),
