@@ -21,6 +21,21 @@ PPO_TRACKER_HEADLINE_METRIC_KEYS = frozenset(
     }
 )
 
+PPO_EPOCH_TRACKER_HEADLINE_METRIC_KEYS = frozenset(
+    {
+        "ppo_iteration",
+        "ppo_epoch_in_iteration",
+        "ppo_epochs_per_batch",
+        "optimizer_steps_completed_in_iteration",
+        "num_stage_trajectories",
+        "num_rollouts",
+        "mean_policy_loss",
+        "mean_value_loss",
+        "mean_kl",
+        "mean_entropy",
+    }
+)
+
 
 def _truncate_text(text: str, *, max_chars: int) -> str:
     if len(text) <= max_chars:
@@ -41,6 +56,14 @@ def tracker_headline_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     return {
         key: metrics[key]
         for key in PPO_TRACKER_HEADLINE_METRIC_KEYS
+        if key in metrics
+    }
+
+
+def tracker_epoch_headline_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: metrics[key]
+        for key in PPO_EPOCH_TRACKER_HEADLINE_METRIC_KEYS
         if key in metrics
     }
 

@@ -37,7 +37,7 @@ class PPOConfig:
     entropy_coef: float = 0.0
     max_grad_norm: float = 1.0
     save_every_iterations: int = 10
-    diagnostic_log_every_optimizer_steps: int = 25
+    diagnostic_log_every_ppo_epochs: int = 1
     trajectory_preview_every_iterations: int = 25
     num_trajectory_samples_to_log: int = 3
     trajectory_preview_max_chars: int = 240
@@ -70,12 +70,12 @@ class PPOConfig:
             save_every_iterations=int(
                 payload.get("save_every_iterations", cls.save_every_iterations)
             ),
-            diagnostic_log_every_optimizer_steps=max(
+            diagnostic_log_every_ppo_epochs=max(
                 1,
                 int(
                     payload.get(
-                        "diagnostic_log_every_optimizer_steps",
-                        cls.diagnostic_log_every_optimizer_steps,
+                        "diagnostic_log_every_ppo_epochs",
+                        cls.diagnostic_log_every_ppo_epochs,
                     )
                 ),
             ),

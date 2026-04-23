@@ -52,21 +52,27 @@ def test_ppo_config_from_dict_supports_diagnostic_logging_fields() -> None:
     default_config = PPOConfig.from_dict({})
     explicit_config = PPOConfig.from_dict(
         {
-            "diagnostic_log_every_optimizer_steps": 12,
+            "diagnostic_log_every_ppo_epochs": 3,
             "trajectory_preview_every_iterations": 7,
             "num_trajectory_samples_to_log": 5,
             "trajectory_preview_max_chars": 180,
         }
     )
 
-    assert default_config.diagnostic_log_every_optimizer_steps == 25
+    assert default_config.diagnostic_log_every_ppo_epochs == 1
     assert default_config.trajectory_preview_every_iterations == 25
     assert default_config.num_trajectory_samples_to_log == 3
     assert default_config.trajectory_preview_max_chars == 240
-    assert explicit_config.diagnostic_log_every_optimizer_steps == 12
+    assert explicit_config.diagnostic_log_every_ppo_epochs == 3
     assert explicit_config.trajectory_preview_every_iterations == 7
     assert explicit_config.num_trajectory_samples_to_log == 5
     assert explicit_config.trajectory_preview_max_chars == 180
+
+
+def test_ppo_config_from_dict_clamps_epoch_diagnostic_logging_cadence() -> None:
+    config = PPOConfig.from_dict({"diagnostic_log_every_ppo_epochs": 0})
+
+    assert config.diagnostic_log_every_ppo_epochs == 1
 
 
 def test_ppo_rollout_defaults_enable_constrained_decoding_and_tighter_sampling() -> None:
@@ -218,7 +224,7 @@ def test_build_trajectory_preview_payload_selects_best_median_and_worst_rollouts
     assert "generated_selfies=A" in preview["tracker_text"]
 
 
-def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkeypatch) -> None:
+def _build_dummy_ppo_trainer(config: PPOConfig) -> MoleculeWisePPOTrainer:
     class DummyPolicyValueModel(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -234,17 +240,7 @@ def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkey
 
     policy_model = DummyPolicyValueModel()
     reference_model = torch.nn.Linear(1, 1)
-    config = PPOConfig(
-        ppo_iterations=3,
-        batch_size=3,
-        mini_batch_size=2,
-        ppo_epochs_per_batch=1,
-        diagnostic_log_every_optimizer_steps=2,
-        trajectory_preview_every_iterations=1,
-        num_trajectory_samples_to_log=2,
-        save_every_iterations=99,
-    )
-    trainer = MoleculeWisePPOTrainer(
+    return MoleculeWisePPOTrainer(
         policy_model=policy_model,
         reference_model=reference_model,
         tokenizer=None,
@@ -252,7 +248,9 @@ def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkey
         device=torch.device("cpu"),
     )
 
-    trajectories = [
+
+def _build_iteration_test_trajectories() -> list[StageTrajectory]:
+    return [
         _make_stage_trajectory(
             rollout_id="rollout-a",
             example_id="example-a",
@@ -295,6 +293,12 @@ def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkey
         ),
     ]
 
+
+def _patch_iteration_statistics(
+    monkeypatch: pytest.MonkeyPatch,
+    trainer: MoleculeWisePPOTrainer,
+    trajectories: list[StageTrajectory],
+) -> None:
     coefficients = {
         "rollout-a": (0.9, 0.2, 0.5),
         "rollout-b": (0.7, 0.3, 0.4),
@@ -318,7 +322,27 @@ def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkey
         fake_compute_stage_statistics,
     )
 
+
+def test_train_iteration_returns_epoch_and_optimizer_diagnostics_and_preview(
+    monkeypatch,
+    capsys,
+) -> None:
+    config = PPOConfig(
+        ppo_iterations=3,
+        batch_size=3,
+        mini_batch_size=2,
+        ppo_epochs_per_batch=2,
+        diagnostic_log_every_ppo_epochs=1,
+        trajectory_preview_every_iterations=1,
+        num_trajectory_samples_to_log=2,
+        save_every_iterations=99,
+    )
+    trainer = _build_dummy_ppo_trainer(config)
+    trajectories = _build_iteration_test_trajectories()
+    _patch_iteration_statistics(monkeypatch, trainer, trajectories)
+
     result = trainer.train_iteration([{"id": "unused"}], iteration_index=1)
+    captured = capsys.readouterr()
 
     assert {"reward_std", "mean_old_logprob", "termination_fraction_max_sequence_length"} <= set(
         result.metrics
@@ -327,20 +351,74 @@ def test_train_iteration_returns_sparse_optimizer_diagnostics_and_preview(monkey
     assert result.metrics["max_action_token_count"] == 2.0
     assert result.metrics["empty_action_rate"] == 1.0 / 3.0
     assert result.diagnostic_metrics is not None
+    assert result.diagnostic_metrics["num_stage_trajectories"] == 3.0
     assert result.diagnostic_metrics["mean_realized_stage_count"] == 1.0
     assert result.categorized_diagnostic_metrics is not None
+    assert result.categorized_diagnostic_metrics["stage_rollout"]["num_stage_trajectories"] == 3.0
     assert result.categorized_diagnostic_metrics["stage_rollout"]["mean_realized_stage_count"] == 1.0
     assert result.categorized_diagnostic_metrics["reward_only"]["mean_total_reward"] == 2.0
-    assert len(result.optimizer_step_metrics) == 1
-    assert result.optimizer_step_metrics[0]["optimizer_step"] == 2
-    assert result.optimizer_step_metrics[0]["mini_batch_size"] == 1
-    assert result.optimizer_step_metrics[0]["all_finite"] is True
-    assert result.categorized_optimizer_step_metrics[0]["optimizer"]["mini_batch_size"] == 1
+    assert len(result.epoch_metrics) == 2
+    assert [metrics["ppo_epoch_in_iteration"] for metrics in result.epoch_metrics] == [1, 2]
+    assert all(metrics["ppo_iteration"] == 1 for metrics in result.epoch_metrics)
+    assert all(metrics["num_stage_trajectories"] == 3.0 for metrics in result.epoch_metrics)
+    assert result.epoch_metrics[0]["optimizer_steps_completed_in_iteration"] == 2
+    assert result.epoch_metrics[1]["optimizer_steps_completed_in_iteration"] == 4
+    assert result.categorized_epoch_metrics[0]["stage_rollout"]["num_rollouts"] == 3.0
+    assert result.categorized_epoch_metrics[0]["optimizer"]["mean_policy_loss"] > 0.0
+    assert len(result.optimizer_step_metrics) == 4
+    assert [metrics["optimizer_step"] for metrics in result.optimizer_step_metrics] == [1, 2, 3, 4]
+    assert [metrics["optimizer_step_in_iteration"] for metrics in result.optimizer_step_metrics] == [
+        1,
+        2,
+        3,
+        4,
+    ]
+    assert [metrics["ppo_epoch_in_iteration"] for metrics in result.optimizer_step_metrics] == [
+        1,
+        1,
+        2,
+        2,
+    ]
+    assert [metrics["mini_batch_size"] for metrics in result.optimizer_step_metrics] == [2, 1, 2, 1]
+    assert all(metrics["all_finite"] is True for metrics in result.optimizer_step_metrics)
+    assert result.categorized_optimizer_step_metrics[0]["optimizer"]["mini_batch_size"] == 2
     assert result.categorized_optimizer_step_metrics[0]["numerics"]["all_finite"] is True
     assert "clip_fraction" in result.optimizer_step_metrics[0]
     assert result.trajectory_preview is not None
     assert len(result.trajectory_preview["records"]) == 2
     assert all(record["num_stages"] == 1 for record in result.trajectory_preview["records"])
+    assert "[ppo][iteration 1/3][epoch 1/2] optimizer steps this epoch=2 total_optimizer_step=2" in captured.out
+    assert "[ppo][iteration 1/3][epoch 2/2] optimizer steps this epoch=2 total_optimizer_step=4" in captured.out
+
+
+def test_train_iteration_emits_batch_step_diagnostics_for_every_optimizer_step(
+    monkeypatch,
+) -> None:
+    config = PPOConfig(
+        ppo_iterations=2,
+        batch_size=3,
+        mini_batch_size=2,
+        ppo_epochs_per_batch=3,
+        diagnostic_log_every_ppo_epochs=1,
+        trajectory_preview_every_iterations=99,
+        save_every_iterations=99,
+    )
+    trainer = _build_dummy_ppo_trainer(config)
+    trajectories = _build_iteration_test_trajectories()
+    _patch_iteration_statistics(monkeypatch, trainer, trajectories)
+
+    result = trainer.train_iteration([{"id": "unused"}], iteration_index=1)
+
+    assert [metrics["ppo_epoch_in_iteration"] for metrics in result.epoch_metrics] == [1, 2, 3]
+    assert [metrics["optimizer_step"] for metrics in result.optimizer_step_metrics] == [1, 2, 3, 4, 5, 6]
+    assert [metrics["ppo_epoch_in_iteration"] for metrics in result.optimizer_step_metrics] == [
+        1,
+        1,
+        2,
+        2,
+        3,
+        3,
+    ]
 
 
 def test_resolve_ppo_checkpoint_source_prefers_existing_local_checkpoint(tmp_path: Path) -> None:
@@ -780,7 +858,7 @@ def test_run_molecule_stage_ppo_skips_constraint_initialization_when_disabled(
     assert policy_model.constraints == [None]
 
 
-def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
+def test_run_molecule_stage_ppo_logs_iteration_epoch_and_batch_step_diagnostics_and_preview(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -833,18 +911,64 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
                     "mean_policy_loss": 0.3,
                     "mean_value_loss": 0.4,
                     "num_stage_trajectories": 2.0,
+                    "num_rollouts": 1.0,
                     "mean_realized_stage_count": 1.5,
                     "fraction_rollouts_reaching_stage_2": 0.5,
                 },
                 diagnostic_metrics={
                     "iteration": float(iteration_index),
+                    "mean_reward": 1.5,
+                    "mean_kl": 0.1,
+                    "mean_entropy": 0.2,
+                    "mean_policy_loss": 0.3,
+                    "mean_value_loss": 0.4,
+                    "num_stage_trajectories": 2.0,
+                    "num_rollouts": 1.0,
                     "mean_realized_stage_count": 1.5,
                     "fraction_rollouts_reaching_stage_2": 0.5,
                 },
+                epoch_metrics=[
+                    {
+                        "ppo_iteration": iteration_index,
+                        "ppo_epoch_in_iteration": 1,
+                        "ppo_epochs_per_batch": 2,
+                        "optimizer_steps_completed_in_iteration": 2,
+                        "mean_policy_loss": 0.35,
+                        "mean_value_loss": 0.45,
+                        "mean_kl": 0.15,
+                        "mean_entropy": 0.25,
+                        "num_stage_trajectories": 2.0,
+                        "num_rollouts": 1.0,
+                        "stage1_num_trajectories": 1.0,
+                        "stage2_num_trajectories": 1.0,
+                        "stage3_num_trajectories": 0.0,
+                        "grad_norm": 0.8,
+                        "all_finite": True,
+                    },
+                    {
+                        "ppo_iteration": iteration_index,
+                        "ppo_epoch_in_iteration": 2,
+                        "ppo_epochs_per_batch": 2,
+                        "optimizer_steps_completed_in_iteration": 4,
+                        "mean_policy_loss": 0.3,
+                        "mean_value_loss": 0.4,
+                        "mean_kl": 0.1,
+                        "mean_entropy": 0.2,
+                        "num_stage_trajectories": 2.0,
+                        "num_rollouts": 1.0,
+                        "stage1_num_trajectories": 1.0,
+                        "stage2_num_trajectories": 1.0,
+                        "stage3_num_trajectories": 0.0,
+                        "grad_norm": 0.7,
+                        "all_finite": True,
+                    },
+                ],
                 optimizer_step_metrics=[
                     {
                         "optimizer_step": 25,
+                        "optimizer_step_in_iteration": 4,
                         "ppo_iteration": iteration_index,
+                        "ppo_epoch_in_iteration": 2,
                         "mini_batch_size": 4,
                         "policy_loss": 0.3,
                         "value_loss": 0.4,
@@ -955,7 +1079,7 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
                 "ppo_iterations": 1,
                 "batch_size": 1,
                 "mini_batch_size": 1,
-                "ppo_epochs_per_batch": 1,
+                "ppo_epochs_per_batch": 2,
                 "rollout": {"constrained_decoding": False},
             },
         },
@@ -967,6 +1091,10 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
     iteration_diagnostics_path = output_dir / "diagnostics" / "iteration_diagnostics.jsonl"
     iteration_diagnostics_categorized_path = (
         output_dir / "diagnostics" / "iteration_diagnostics_categorized.jsonl"
+    )
+    epoch_diagnostics_path = output_dir / "diagnostics" / "epoch_diagnostics.jsonl"
+    epoch_diagnostics_categorized_path = (
+        output_dir / "diagnostics" / "epoch_diagnostics_categorized.jsonl"
     )
     optimizer_diagnostics_path = output_dir / "diagnostics" / "optimizer_step_metrics.jsonl"
     optimizer_diagnostics_categorized_path = (
@@ -981,6 +1109,16 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
     iteration_diagnostics_categorized_records = [
         json.loads(line)
         for line in iteration_diagnostics_categorized_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    epoch_diagnostics_records = [
+        json.loads(line)
+        for line in epoch_diagnostics_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    epoch_diagnostics_categorized_records = [
+        json.loads(line)
+        for line in epoch_diagnostics_categorized_path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
     optimizer_records = [
@@ -1004,6 +1142,14 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
     diagnostic_calls = [
         (payload, step) for payload, step, prefix in tracker.metric_calls if prefix == "ppo_diagnostics"
     ]
+    epoch_headline_calls = [
+        (payload, step) for payload, step, prefix in tracker.metric_calls if prefix == "ppo_epoch"
+    ]
+    epoch_diagnostic_calls = [
+        (payload, step)
+        for payload, step, prefix in tracker.metric_calls
+        if prefix == "ppo_epoch_diagnostics"
+    ]
     optimizer_calls = [
         (payload, step) for payload, step, prefix in tracker.metric_calls if prefix == "ppo_optimizer"
     ]
@@ -1011,6 +1157,11 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
         (prefix, step): payload
         for payload, step, prefix in tracker.metric_calls
         if prefix.startswith("ppo_diagnostics_")
+    }
+    categorized_epoch_calls = {
+        (prefix, step): payload
+        for payload, step, prefix in tracker.metric_calls
+        if prefix.startswith("ppo_epoch_diagnostics_")
     }
     categorized_optimizer_calls = {
         (prefix, step): payload
@@ -1023,56 +1174,105 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
         (
             {
                 "iteration": 1.0,
+                "mean_reward": 1.5,
+                "mean_kl": 0.1,
+                "mean_entropy": 0.2,
+                "mean_policy_loss": 0.3,
+                "mean_value_loss": 0.4,
+                "num_stage_trajectories": 2.0,
+                "num_rollouts": 1.0,
                 "mean_realized_stage_count": 1.5,
                 "fraction_rollouts_reaching_stage_2": 0.5,
             },
             1,
         ),
+    ]
+    assert epoch_headline_calls == [
         (
             {
-                "optimizer_step": 25,
                 "ppo_iteration": 1,
-                "mini_batch_size": 4,
-                "policy_loss": 0.3,
-                "value_loss": 0.4,
-                "total_loss": 0.5,
-                "entropy_bonus": 0.2,
-                "approx_kl_mean": 0.1,
-                "ratio_mean": 1.0,
-                "ratio_std": 0.05,
-                "clip_fraction": 0.0,
-                "batch_advantage_mean": 0.0,
-                "batch_advantage_std": 1.0,
-                "batch_return_mean": 1.5,
-                "new_value_mean": 1.2,
-                "grad_norm": 0.9,
-                "all_finite": True,
+                "ppo_epoch_in_iteration": 1,
+                "ppo_epochs_per_batch": 2,
+                "optimizer_steps_completed_in_iteration": 2,
+                "num_stage_trajectories": 2.0,
+                "num_rollouts": 1.0,
+                "mean_policy_loss": 0.35,
+                "mean_value_loss": 0.45,
+                "mean_kl": 0.15,
+                "mean_entropy": 0.25,
             },
-            25,
+            1,
+        ),
+        (
+            {
+                "ppo_iteration": 1,
+                "ppo_epoch_in_iteration": 2,
+                "ppo_epochs_per_batch": 2,
+                "optimizer_steps_completed_in_iteration": 4,
+                "num_stage_trajectories": 2.0,
+                "num_rollouts": 1.0,
+                "mean_policy_loss": 0.3,
+                "mean_value_loss": 0.4,
+                "mean_kl": 0.1,
+                "mean_entropy": 0.2,
+            },
+            2,
         ),
     ]
+    assert epoch_diagnostic_calls[0][1] == 1
+    assert epoch_diagnostic_calls[1][1] == 2
+    assert epoch_diagnostic_calls[0][0]["ppo_epoch_in_iteration"] == 1
+    assert epoch_diagnostic_calls[1][0]["ppo_epoch_in_iteration"] == 2
     assert categorized_diagnostic_calls == {
+        ("ppo_diagnostics_reward_only", 1): {
+            "mean_reward": 1.5,
+        },
         ("ppo_diagnostics_stage_rollout", 1): {
+            "num_stage_trajectories": 2.0,
+            "num_rollouts": 1.0,
             "mean_realized_stage_count": 1.5,
             "fraction_rollouts_reaching_stage_2": 0.5,
         },
-        ("ppo_diagnostics_optimizer", 25): {
-            "mini_batch_size": 4,
-            "policy_loss": 0.3,
-            "value_loss": 0.4,
-            "total_loss": 0.5,
-            "entropy_bonus": 0.2,
-            "approx_kl_mean": 0.1,
-            "ratio_mean": 1.0,
-            "ratio_std": 0.05,
-            "clip_fraction": 0.0,
-            "batch_advantage_mean": 0.0,
-            "batch_advantage_std": 1.0,
-            "batch_return_mean": 1.5,
-            "new_value_mean": 1.2,
+        ("ppo_diagnostics_optimizer", 1): {
+            "mean_kl": 0.1,
+            "mean_entropy": 0.2,
+            "mean_policy_loss": 0.3,
+            "mean_value_loss": 0.4,
         },
-        ("ppo_diagnostics_numerics", 25): {
-            "grad_norm": 0.9,
+    }
+    assert categorized_epoch_calls == {
+        ("ppo_epoch_diagnostics_stage_rollout", 1): {
+            "num_stage_trajectories": 2.0,
+            "num_rollouts": 1.0,
+            "stage1_num_trajectories": 1.0,
+            "stage2_num_trajectories": 1.0,
+            "stage3_num_trajectories": 0.0,
+        },
+        ("ppo_epoch_diagnostics_optimizer", 1): {
+            "mean_policy_loss": 0.35,
+            "mean_value_loss": 0.45,
+            "mean_kl": 0.15,
+            "mean_entropy": 0.25,
+        },
+        ("ppo_epoch_diagnostics_numerics", 1): {
+            "grad_norm": 0.8,
+            "all_finite": True,
+        },
+        ("ppo_epoch_diagnostics_stage_rollout", 2): {
+            "num_stage_trajectories": 2.0,
+            "num_rollouts": 1.0,
+            "stage1_num_trajectories": 1.0,
+            "stage2_num_trajectories": 1.0,
+            "stage3_num_trajectories": 0.0,
+        },
+        ("ppo_epoch_diagnostics_optimizer", 2): {
+            "mean_policy_loss": 0.3,
+            "mean_value_loss": 0.4,
+            "mean_kl": 0.1,
+            "mean_entropy": 0.2,
+        },
+        ("ppo_epoch_diagnostics_numerics", 2): {
+            "grad_norm": 0.7,
             "all_finite": True,
         },
     }
@@ -1080,7 +1280,9 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
         (
             {
                 "optimizer_step": 25,
+                "optimizer_step_in_iteration": 4,
                 "ppo_iteration": 1,
+                "ppo_epoch_in_iteration": 2,
                 "mini_batch_size": 4,
                 "policy_loss": 0.3,
                 "value_loss": 0.4,
@@ -1129,6 +1331,13 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
     assert iteration_diagnostics_records == [
         {
             "iteration": 1.0,
+            "mean_reward": 1.5,
+            "mean_kl": 0.1,
+            "mean_entropy": 0.2,
+            "mean_policy_loss": 0.3,
+            "mean_value_loss": 0.4,
+            "num_stage_trajectories": 2.0,
+            "num_rollouts": 1.0,
             "mean_realized_stage_count": 1.5,
             "fraction_rollouts_reaching_stage_2": 0.5,
         }
@@ -1137,18 +1346,117 @@ def test_run_molecule_stage_ppo_logs_sparse_diagnostics_and_preview(
         {
             "iteration": 1.0,
             "categories": {
+                "reward_only": {"mean_reward": 1.5},
                 "stage_rollout": {
+                    "num_stage_trajectories": 2.0,
+                    "num_rollouts": 1.0,
                     "mean_realized_stage_count": 1.5,
                     "fraction_rollouts_reaching_stage_2": 0.5,
-                }
+                },
+                "optimizer": {
+                    "mean_kl": 0.1,
+                    "mean_entropy": 0.2,
+                    "mean_policy_loss": 0.3,
+                    "mean_value_loss": 0.4,
+                },
             },
         }
+    ]
+    assert epoch_diagnostics_records == [
+        {
+            "ppo_iteration": 1,
+            "ppo_epoch_in_iteration": 1,
+            "ppo_epochs_per_batch": 2,
+            "optimizer_steps_completed_in_iteration": 2,
+            "mean_policy_loss": 0.35,
+            "mean_value_loss": 0.45,
+            "mean_kl": 0.15,
+            "mean_entropy": 0.25,
+            "num_stage_trajectories": 2.0,
+            "num_rollouts": 1.0,
+            "stage1_num_trajectories": 1.0,
+            "stage2_num_trajectories": 1.0,
+            "stage3_num_trajectories": 0.0,
+            "grad_norm": 0.8,
+            "all_finite": True,
+        },
+        {
+            "ppo_iteration": 1,
+            "ppo_epoch_in_iteration": 2,
+            "ppo_epochs_per_batch": 2,
+            "optimizer_steps_completed_in_iteration": 4,
+            "mean_policy_loss": 0.3,
+            "mean_value_loss": 0.4,
+            "mean_kl": 0.1,
+            "mean_entropy": 0.2,
+            "num_stage_trajectories": 2.0,
+            "num_rollouts": 1.0,
+            "stage1_num_trajectories": 1.0,
+            "stage2_num_trajectories": 1.0,
+            "stage3_num_trajectories": 0.0,
+            "grad_norm": 0.7,
+            "all_finite": True,
+        },
+    ]
+    assert epoch_diagnostics_categorized_records == [
+        {
+            "ppo_iteration": 1,
+            "ppo_epoch_in_iteration": 1,
+            "ppo_epochs_per_batch": 2,
+            "optimizer_steps_completed_in_iteration": 2,
+            "categories": {
+                "stage_rollout": {
+                    "num_stage_trajectories": 2.0,
+                    "num_rollouts": 1.0,
+                    "stage1_num_trajectories": 1.0,
+                    "stage2_num_trajectories": 1.0,
+                    "stage3_num_trajectories": 0.0,
+                },
+                "optimizer": {
+                    "mean_policy_loss": 0.35,
+                    "mean_value_loss": 0.45,
+                    "mean_kl": 0.15,
+                    "mean_entropy": 0.25,
+                },
+                "numerics": {
+                    "grad_norm": 0.8,
+                    "all_finite": True,
+                },
+            },
+        },
+        {
+            "ppo_iteration": 1,
+            "ppo_epoch_in_iteration": 2,
+            "ppo_epochs_per_batch": 2,
+            "optimizer_steps_completed_in_iteration": 4,
+            "categories": {
+                "stage_rollout": {
+                    "num_stage_trajectories": 2.0,
+                    "num_rollouts": 1.0,
+                    "stage1_num_trajectories": 1.0,
+                    "stage2_num_trajectories": 1.0,
+                    "stage3_num_trajectories": 0.0,
+                },
+                "optimizer": {
+                    "mean_policy_loss": 0.3,
+                    "mean_value_loss": 0.4,
+                    "mean_kl": 0.1,
+                    "mean_entropy": 0.2,
+                },
+                "numerics": {
+                    "grad_norm": 0.7,
+                    "all_finite": True,
+                },
+            },
+        },
     ]
     assert optimizer_records[0]["optimizer_step"] == 25
     assert optimizer_categorized_records == [
         {
             "optimizer_step": 25,
+            "optimizer_step_in_iteration": 4,
             "ppo_iteration": 1,
+            "ppo_epoch_in_iteration": 2,
             "categories": {
                 "optimizer": {
                     "mini_batch_size": 4,

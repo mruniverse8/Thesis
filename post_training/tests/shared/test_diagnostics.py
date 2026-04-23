@@ -35,7 +35,9 @@ def test_categorize_metric_payload_groups_iteration_diagnostics_by_bucket() -> N
 def test_build_categorized_metric_record_and_tracker_payloads_preserve_metadata() -> None:
     payload = {
         "optimizer_step": 25,
+        "optimizer_step_in_iteration": 6,
         "ppo_iteration": 2,
+        "ppo_epoch_in_iteration": 3,
         "policy_loss": 0.3,
         "grad_norm": 0.8,
         "all_finite": True,
@@ -43,17 +45,29 @@ def test_build_categorized_metric_record_and_tracker_payloads_preserve_metadata(
 
     record = build_categorized_metric_record(
         payload,
-        metadata_keys=("optimizer_step", "ppo_iteration"),
+        metadata_keys=(
+            "optimizer_step",
+            "optimizer_step_in_iteration",
+            "ppo_iteration",
+            "ppo_epoch_in_iteration",
+        ),
     )
     tracker_payloads = iter_categorized_tracker_payloads(
         payload,
         base_prefix="ppo_optimizer",
-        metadata_keys=("optimizer_step", "ppo_iteration"),
+        metadata_keys=(
+            "optimizer_step",
+            "optimizer_step_in_iteration",
+            "ppo_iteration",
+            "ppo_epoch_in_iteration",
+        ),
     )
 
     assert record == {
         "optimizer_step": 25,
+        "optimizer_step_in_iteration": 6,
         "ppo_iteration": 2,
+        "ppo_epoch_in_iteration": 3,
         "categories": {
             "optimizer": {"policy_loss": 0.3},
             "numerics": {"grad_norm": 0.8, "all_finite": True},

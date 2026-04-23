@@ -225,16 +225,22 @@ def sample_stage(
         raw_stage_text,
         drop_terminal_eom_from_action_ids=True,
     )
+    action_token_ids = tuple(projection.action_token_ids)
+    used_raw_action_ids_for_invalid_projection = False
+    if projection.sampled_selfies is None and not action_token_ids:
+        action_token_ids = tuple(raw_action_token_ids)
+        used_raw_action_ids_for_invalid_projection = bool(action_token_ids)
 
     return {
         "stage_text": projection.stage_text,
         "sampled_selfies": projection.sampled_selfies,
-        "action_token_ids": tuple(projection.action_token_ids),
+        "action_token_ids": action_token_ids,
         "stop_token": stop_token,
         "termination_reason": termination_reason,
         "metadata": {
             **projection.metadata,
             "raw_action_token_ids": tuple(raw_action_token_ids),
+            "used_raw_action_ids_for_invalid_projection": used_raw_action_ids_for_invalid_projection,
         },
     }
 
@@ -300,16 +306,22 @@ def sample_stage_trajectories_for_example(
             reward_config=reward_config,
             invalid_terminal_reward=invalid_terminal_reward,
         )
-        if trajectory.sampled_selfies:
+        if trajectory.is_valid and trajectory.sampled_selfies:
             previous_sampled_selfies.append(trajectory.sampled_selfies)
 
+        trajectory_appended = False
         should_append = stage_index == 1 or (
             float(generator.random()) < generation_config.append_probability
         )
         if should_append:
             trajectories.append(trajectory)
+            trajectory_appended = True
 
         if trajectory.termination_reason != "stop_token":
+            if not trajectory_appended:
+                trajectories.append(trajectory)
+            break
+        if generation_config.terminate_on_invalid_stage and not trajectory.is_valid:
             break
         stage_index += 1
 

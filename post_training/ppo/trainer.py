@@ -28,6 +28,8 @@ from post_training.shared.diagnostics import (
 from post_training.sft_multi.dataset import MultiMoleculeDataset
 
 from .checkpointing import (
+    append_epoch_diagnostics,
+    append_epoch_diagnostics_categorized,
     append_iteration_diagnostics,
     append_iteration_diagnostics_categorized,
     append_optimizer_step_metrics_categorized,
@@ -42,7 +44,7 @@ from .diagnostics import (
     build_trajectory_preview_payload,
     rollout_stage_metrics,
     termination_reason_metrics,
-    tracker_diagnostic_metrics,
+    tracker_epoch_headline_metrics,
     tracker_headline_metrics,
 )
 from .model import (
@@ -85,10 +87,34 @@ def _all_finite(*tensors: torch.Tensor) -> bool:
 class PPOTrainIterationResult:
     metrics: dict[str, float]
     optimizer_step_metrics: list[dict[str, Any]]
+    epoch_metrics: list[dict[str, Any]] = field(default_factory=list)
     diagnostic_metrics: dict[str, Any] | None = None
     categorized_diagnostic_metrics: dict[str, dict[str, Any]] | None = None
+    categorized_epoch_metrics: list[dict[str, dict[str, Any]]] = field(default_factory=list)
     categorized_optimizer_step_metrics: list[dict[str, dict[str, Any]]] = field(default_factory=list)
     trajectory_preview: dict[str, Any] | None = None
+
+
+ITERATION_DIAGNOSTIC_METADATA_KEYS = ("iteration",)
+EPOCH_DIAGNOSTIC_METADATA_KEYS = (
+    "ppo_iteration",
+    "ppo_epoch_in_iteration",
+    "ppo_epochs_per_batch",
+    "optimizer_steps_completed_in_iteration",
+)
+OPTIMIZER_STEP_DIAGNOSTIC_METADATA_KEYS = (
+    "optimizer_step",
+    "optimizer_step_in_iteration",
+    "ppo_iteration",
+    "ppo_epoch_in_iteration",
+)
+
+
+def _ppo_epoch_tracker_step(epoch_metrics: dict[str, Any]) -> int:
+    return (
+        (int(epoch_metrics["ppo_iteration"]) - 1) * int(epoch_metrics["ppo_epochs_per_batch"])
+        + int(epoch_metrics["ppo_epoch_in_iteration"])
+    )
 
 
 class MoleculeWisePPOTrainer:
@@ -188,26 +214,20 @@ class MoleculeWisePPOTrainer:
                 "iteration": float(iteration_index),
                 "num_stage_trajectories": 0.0,
             }
+            empty_iteration_diagnostics = {
+                **metrics,
+                **termination_reason_metrics(()),
+                **rollout_stage_metrics(
+                    (),
+                    max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
+                ),
+            }
             return PPOTrainIterationResult(
                 metrics=metrics,
-                diagnostic_metrics={
-                    "iteration": float(iteration_index),
-                    **termination_reason_metrics(()),
-                    **rollout_stage_metrics(
-                        (),
-                        max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
-                    ),
-                },
+                diagnostic_metrics=empty_iteration_diagnostics,
                 categorized_diagnostic_metrics=categorize_metric_payload(
-                    {
-                        "iteration": float(iteration_index),
-                        **termination_reason_metrics(()),
-                        **rollout_stage_metrics(
-                            (),
-                            max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
-                        ),
-                    },
-                    metadata_keys=("iteration",),
+                    empty_iteration_diagnostics,
+                    metadata_keys=ITERATION_DIAGNOSTIC_METADATA_KEYS,
                 ),
                 optimizer_step_metrics=[],
             )
@@ -237,14 +257,40 @@ class MoleculeWisePPOTrainer:
         advantages = standardize_tensor(raw_advantages)
 
         action_token_counts = [len(trajectory.action_token_ids) for trajectory in trajectories]
+        rollout_stage_summary = rollout_stage_metrics(
+            trajectories,
+            max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
+        )
+        epoch_rollout_context = {
+            "num_stage_trajectories": float(len(trajectories)),
+            "num_rollouts": float(rollout_stage_summary.get("num_rollouts", 0.0)),
+            "stage1_num_trajectories": float(rollout_stage_summary.get("stage1_num_trajectories", 0.0)),
+            "stage2_num_trajectories": float(rollout_stage_summary.get("stage2_num_trajectories", 0.0)),
+            "stage3_num_trajectories": float(rollout_stage_summary.get("stage3_num_trajectories", 0.0)),
+        }
         total_policy_loss = 0.0
         total_value_loss = 0.0
         total_kl = 0.0
         total_entropy = 0.0
         num_optimizer_steps = 0
+        epoch_metrics: list[dict[str, Any]] = []
         optimizer_step_metrics: list[dict[str, Any]] = []
 
-        for _ in range(self.config.ppo_epochs_per_batch):
+        for epoch_idx in range(self.config.ppo_epochs_per_batch):
+            epoch_policy_loss = 0.0
+            epoch_value_loss = 0.0
+            epoch_kl = 0.0
+            epoch_entropy = 0.0
+            epoch_ratio_mean = 0.0
+            epoch_ratio_std = 0.0
+            epoch_clip_fraction = 0.0
+            epoch_batch_advantage_mean = 0.0
+            epoch_batch_advantage_std = 0.0
+            epoch_batch_return_mean = 0.0
+            epoch_new_value_mean = 0.0
+            epoch_grad_norm = 0.0
+            epoch_optimizer_steps = 0
+            epoch_all_finite = True
             permutation = torch.randperm(len(trajectories))
             for start in range(0, len(trajectories), self.config.mini_batch_size):
                 batch_indices = permutation[start : start + self.config.mini_batch_size]
@@ -312,39 +358,96 @@ class MoleculeWisePPOTrainer:
                 total_kl += float(kl.mean().item())
                 total_entropy += float(entropy_bonus.item())
                 num_optimizer_steps += 1
-
-                if self.optimizer_step % self.config.diagnostic_log_every_optimizer_steps == 0:
-                    optimizer_step_metrics.append(
-                        {
-                            "optimizer_step": self.optimizer_step,
-                            "ppo_iteration": iteration_index,
-                            "mini_batch_size": int(batch_indices.numel()),
-                            "policy_loss": float(policy_loss.item()),
-                            "value_loss": float(value_loss.item()),
-                            "total_loss": float(loss.item()),
-                            "entropy_bonus": float(entropy_bonus.item()),
-                            "approx_kl_mean": float(kl.mean().item()),
-                            "ratio_mean": _tensor_mean(ratio),
-                            "ratio_std": _tensor_std(ratio),
-                            "clip_fraction": float(
-                                (
-                                    (ratio < 1.0 - self.config.clip_range)
-                                    | (ratio > 1.0 + self.config.clip_range)
-                                )
-                                .float()
-                                .mean()
-                                .item()
-                            ),
-                            "batch_advantage_mean": _tensor_mean(batch_advantages),
-                            "batch_advantage_std": _tensor_std(batch_advantages),
-                            "batch_return_mean": _tensor_mean(batch_returns),
-                            "new_value_mean": _tensor_mean(new_values_tensor),
-                            "grad_norm": float(
-                                grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
-                            ),
-                            "all_finite": all_finite,
-                        }
+                epoch_policy_loss += float(policy_loss.item())
+                epoch_value_loss += float(value_loss.item())
+                epoch_kl += float(kl.mean().item())
+                epoch_entropy += float(entropy_bonus.item())
+                epoch_ratio_mean += _tensor_mean(ratio)
+                epoch_ratio_std += _tensor_std(ratio)
+                epoch_clip_fraction += float(
+                    (
+                        (ratio < 1.0 - self.config.clip_range)
+                        | (ratio > 1.0 + self.config.clip_range)
                     )
+                    .float()
+                    .mean()
+                    .item()
+                )
+                epoch_batch_advantage_mean += _tensor_mean(batch_advantages)
+                epoch_batch_advantage_std += _tensor_std(batch_advantages)
+                epoch_batch_return_mean += _tensor_mean(batch_returns)
+                epoch_new_value_mean += _tensor_mean(new_values_tensor)
+                epoch_grad_norm += float(
+                    grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+                )
+                epoch_optimizer_steps += 1
+                epoch_all_finite = epoch_all_finite and all_finite
+
+                optimizer_step_metrics.append(
+                    {
+                        "optimizer_step": self.optimizer_step,
+                        "optimizer_step_in_iteration": num_optimizer_steps,
+                        "ppo_iteration": iteration_index,
+                        "ppo_epoch_in_iteration": epoch_idx + 1,
+                        "mini_batch_size": int(batch_indices.numel()),
+                        "policy_loss": float(policy_loss.item()),
+                        "value_loss": float(value_loss.item()),
+                        "total_loss": float(loss.item()),
+                        "entropy_bonus": float(entropy_bonus.item()),
+                        "approx_kl_mean": float(kl.mean().item()),
+                        "ratio_mean": _tensor_mean(ratio),
+                        "ratio_std": _tensor_std(ratio),
+                        "clip_fraction": float(
+                            (
+                                (ratio < 1.0 - self.config.clip_range)
+                                | (ratio > 1.0 + self.config.clip_range)
+                            )
+                            .float()
+                            .mean()
+                            .item()
+                        ),
+                        "batch_advantage_mean": _tensor_mean(batch_advantages),
+                        "batch_advantage_std": _tensor_std(batch_advantages),
+                        "batch_return_mean": _tensor_mean(batch_returns),
+                        "new_value_mean": _tensor_mean(new_values_tensor),
+                        "grad_norm": float(
+                            grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+                        ),
+                        "all_finite": all_finite,
+                    }
+                )
+
+            print(
+                (
+                    f"[ppo][iteration {iteration_index}/{self.config.ppo_iterations}]"
+                    f"[epoch {epoch_idx + 1}/{self.config.ppo_epochs_per_batch}] "
+                    f"optimizer steps this epoch={epoch_optimizer_steps} "
+                    f"total_optimizer_step={self.optimizer_step}"
+                ),
+                flush=True,
+            )
+            epoch_metrics_payload = {
+                "ppo_iteration": iteration_index,
+                "ppo_epoch_in_iteration": epoch_idx + 1,
+                "ppo_epochs_per_batch": self.config.ppo_epochs_per_batch,
+                "optimizer_steps_completed_in_iteration": num_optimizer_steps,
+                "mean_policy_loss": epoch_policy_loss / max(epoch_optimizer_steps, 1),
+                "mean_value_loss": epoch_value_loss / max(epoch_optimizer_steps, 1),
+                "mean_kl": epoch_kl / max(epoch_optimizer_steps, 1),
+                "mean_entropy": epoch_entropy / max(epoch_optimizer_steps, 1),
+                "ratio_mean": epoch_ratio_mean / max(epoch_optimizer_steps, 1),
+                "ratio_std": epoch_ratio_std / max(epoch_optimizer_steps, 1),
+                "clip_fraction": epoch_clip_fraction / max(epoch_optimizer_steps, 1),
+                "batch_advantage_mean": epoch_batch_advantage_mean / max(epoch_optimizer_steps, 1),
+                "batch_advantage_std": epoch_batch_advantage_std / max(epoch_optimizer_steps, 1),
+                "batch_return_mean": epoch_batch_return_mean / max(epoch_optimizer_steps, 1),
+                "new_value_mean": epoch_new_value_mean / max(epoch_optimizer_steps, 1),
+                "grad_norm": epoch_grad_norm / max(epoch_optimizer_steps, 1),
+                "all_finite": epoch_all_finite,
+                **epoch_rollout_context,
+            }
+            if (epoch_idx + 1) % self.config.diagnostic_log_every_ppo_epochs == 0:
+                epoch_metrics.append(epoch_metrics_payload)
 
         reward_summary = summarize_reward_breakdowns(
             [trajectory.reward_breakdown for trajectory in trajectories]
@@ -373,21 +476,25 @@ class MoleculeWisePPOTrainer:
             "empty_action_rate": sum(int(count == 0) for count in action_token_counts)
             / max(len(action_token_counts), 1),
             **termination_reason_metrics(trajectories),
-            **rollout_stage_metrics(
-                trajectories,
-                max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
-            ),
+            **rollout_stage_summary,
             **reward_summary,
         }
-        diagnostic_metrics = tracker_diagnostic_metrics(metrics)
+        diagnostic_metrics = dict(metrics)
         categorized_diagnostic_metrics = categorize_metric_payload(
             diagnostic_metrics,
-            metadata_keys=("iteration",),
+            metadata_keys=ITERATION_DIAGNOSTIC_METADATA_KEYS,
         )
+        categorized_epoch_metrics = [
+            categorize_metric_payload(
+                epoch_metrics_payload,
+                metadata_keys=EPOCH_DIAGNOSTIC_METADATA_KEYS,
+            )
+            for epoch_metrics_payload in epoch_metrics
+        ]
         categorized_optimizer_step_metrics = [
             categorize_metric_payload(
                 optimizer_metrics,
-                metadata_keys=("optimizer_step", "ppo_iteration"),
+                metadata_keys=OPTIMIZER_STEP_DIAGNOSTIC_METADATA_KEYS,
             )
             for optimizer_metrics in optimizer_step_metrics
         ]
@@ -414,6 +521,8 @@ class MoleculeWisePPOTrainer:
             metrics=metrics,
             diagnostic_metrics=diagnostic_metrics,
             categorized_diagnostic_metrics=categorized_diagnostic_metrics,
+            epoch_metrics=epoch_metrics,
+            categorized_epoch_metrics=categorized_epoch_metrics,
             optimizer_step_metrics=optimizer_step_metrics,
             categorized_optimizer_step_metrics=categorized_optimizer_step_metrics,
             trajectory_preview=trajectory_preview,
@@ -582,7 +691,7 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
                     [
                         build_categorized_metric_record(
                             iteration_result.diagnostic_metrics,
-                            metadata_keys=("iteration",),
+                            metadata_keys=ITERATION_DIAGNOSTIC_METADATA_KEYS,
                             categories=iteration_result.categorized_diagnostic_metrics,
                         )
                     ],
@@ -595,13 +704,55 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
                 for prefix, payload in iter_categorized_tracker_payloads(
                     iteration_result.diagnostic_metrics,
                     base_prefix="ppo_diagnostics",
-                    metadata_keys=("iteration",),
+                    metadata_keys=ITERATION_DIAGNOSTIC_METADATA_KEYS,
                 ):
                     tracker.log_metrics(
                         payload,
                         step=iteration,
                         prefix=prefix,
                     )
+            if iteration_result.epoch_metrics:
+                append_epoch_diagnostics(
+                    output_dir,
+                    iteration_result.epoch_metrics,
+                )
+                append_epoch_diagnostics_categorized(
+                    output_dir,
+                    [
+                        build_categorized_metric_record(
+                            diagnostic_metrics,
+                            metadata_keys=EPOCH_DIAGNOSTIC_METADATA_KEYS,
+                            categories=(
+                                iteration_result.categorized_epoch_metrics[index]
+                                if index < len(iteration_result.categorized_epoch_metrics)
+                                else None
+                            ),
+                        )
+                        for index, diagnostic_metrics in enumerate(iteration_result.epoch_metrics)
+                    ],
+                )
+                for epoch_metrics in iteration_result.epoch_metrics:
+                    epoch_step = _ppo_epoch_tracker_step(epoch_metrics)
+                    tracker.log_metrics(
+                        tracker_epoch_headline_metrics(epoch_metrics),
+                        step=epoch_step,
+                        prefix="ppo_epoch",
+                    )
+                    tracker.log_metrics(
+                        epoch_metrics,
+                        step=epoch_step,
+                        prefix="ppo_epoch_diagnostics",
+                    )
+                    for prefix, payload in iter_categorized_tracker_payloads(
+                        epoch_metrics,
+                        base_prefix="ppo_epoch_diagnostics",
+                        metadata_keys=EPOCH_DIAGNOSTIC_METADATA_KEYS,
+                    ):
+                        tracker.log_metrics(
+                            payload,
+                            step=epoch_step,
+                            prefix=prefix,
+                        )
             if iteration_result.optimizer_step_metrics:
                 append_optimizer_step_metrics(
                     output_dir,
@@ -612,7 +763,7 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
                     [
                         build_categorized_metric_record(
                             diagnostic_metrics,
-                            metadata_keys=("optimizer_step", "ppo_iteration"),
+                            metadata_keys=OPTIMIZER_STEP_DIAGNOSTIC_METADATA_KEYS,
                             categories=(
                                 iteration_result.categorized_optimizer_step_metrics[index]
                                 if index < len(iteration_result.categorized_optimizer_step_metrics)
@@ -628,27 +779,12 @@ def run_molecule_stage_ppo(config: dict[str, object]) -> dict[str, object]:
                     tracker.log_metrics(
                         diagnostic_metrics,
                         step=int(diagnostic_metrics["optimizer_step"]),
-                        prefix="ppo_diagnostics",
-                    )
-                    for prefix, payload in iter_categorized_tracker_payloads(
-                        diagnostic_metrics,
-                        base_prefix="ppo_diagnostics",
-                        metadata_keys=("optimizer_step", "ppo_iteration"),
-                    ):
-                        tracker.log_metrics(
-                            payload,
-                            step=int(diagnostic_metrics["optimizer_step"]),
-                            prefix=prefix,
-                        )
-                    tracker.log_metrics(
-                        diagnostic_metrics,
-                        step=int(diagnostic_metrics["optimizer_step"]),
                         prefix="ppo_optimizer",
                     )
                     for prefix, payload in iter_categorized_tracker_payloads(
                         diagnostic_metrics,
                         base_prefix="ppo_optimizer",
-                        metadata_keys=("optimizer_step", "ppo_iteration"),
+                        metadata_keys=OPTIMIZER_STEP_DIAGNOSTIC_METADATA_KEYS,
                     ):
                         tracker.log_metrics(
                             payload,

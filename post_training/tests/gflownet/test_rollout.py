@@ -172,7 +172,7 @@ def test_sample_stage_trajectories_for_example_updates_prefix_after_sampled_stag
     assert trajectories[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]"])
 
 
-def test_sample_stage_trajectories_for_example_continues_after_invalid_stage_when_sampling_stops_normally(
+def test_sample_stage_trajectories_for_example_stops_after_invalid_stage_when_configured(
     monkeypatch,
 ) -> None:
     tokenizer = DummyTokenizer(
@@ -220,12 +220,11 @@ def test_sample_stage_trajectories_for_example_continues_after_invalid_stage_whe
         device=torch.device("cpu"),
     )
 
-    assert len(trajectories) == 2
+    assert len(trajectories) == 1
     assert trajectories[0].is_valid is False
-    assert trajectories[1].decoder_prefix_text == ""
 
 
-def test_sample_stage_trajectories_for_example_trusts_invalid_sampled_selfies_for_prefix_history(
+def test_sample_stage_trajectories_for_example_keeps_invalid_sample_out_of_prefix_history(
     monkeypatch,
 ) -> None:
     tokenizer = DummyTokenizer(
@@ -301,6 +300,7 @@ def test_sample_stage_trajectories_for_example_trusts_invalid_sampled_selfies_fo
         generation_config=GFlowNetRolloutConfig(
             max_molecules_per_sequence=2,
             append_probability=1.0,
+            terminate_on_invalid_stage=False,
         ),
         reward_config=CHEBI20_REWARD_CONFIG,
         invalid_terminal_reward=1.0e-4,
@@ -309,8 +309,8 @@ def test_sample_stage_trajectories_for_example_trusts_invalid_sampled_selfies_fo
 
     assert len(trajectories) == 2
     assert trajectories[0].is_valid is False
-    assert trajectories[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]"])
-    assert trajectories[1].previous_sampled_selfies == ("[C][C][O]",)
+    assert trajectories[1].decoder_prefix_text == ""
+    assert trajectories[1].previous_sampled_selfies == ()
 
 
 def test_sample_stage_trajectories_for_example_appends_stage_two_plus_only_when_probability_allows_it(
@@ -397,6 +397,138 @@ def test_sample_stage_trajectories_for_example_appends_stage_two_plus_only_when_
     assert skipped[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]", "[C][C][N]"])
 
 
+def test_sample_stage_trajectories_for_example_keeps_skipped_early_break_trajectory(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: "<bom>",
+            5: "[C][C][N]",
+        },
+        {EOM_TOKEN: 3},
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    samples = iter(
+        [
+            {
+                "stage_text": "<bom>[C][C][O]<eom>",
+                "sampled_selfies": "[C][C][O]",
+                "action_token_ids": (1, 2),
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+            },
+            {
+                "stage_text": "<bom>[C][C][N]",
+                "sampled_selfies": "[C][C][N]",
+                "action_token_ids": (4, 5),
+                "stop_token": None,
+                "termination_reason": "max_stage_new_tokens",
+            },
+        ]
+    )
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage", lambda *args, **kwargs: next(samples))
+
+    trajectories = sample_stage_trajectories_for_example(
+        DummyModel(),
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=GFlowNetRolloutConfig(
+            max_molecules_per_sequence=3,
+            append_probability=0.30,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandom([0.9]),
+    )
+
+    assert [trajectory.stage_index for trajectory in trajectories] == [1, 2]
+    assert trajectories[1].termination_reason == "max_stage_new_tokens"
+
+
+def test_sample_stage_trajectories_for_example_does_not_duplicate_appended_early_break_trajectory(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: "<bom>",
+            5: "[C][C][N]",
+        },
+        {EOM_TOKEN: 3},
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    samples = iter(
+        [
+            {
+                "stage_text": "<bom>[C][C][O]<eom>",
+                "sampled_selfies": "[C][C][O]",
+                "action_token_ids": (1, 2),
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+            },
+            {
+                "stage_text": "<bom>[C][C][N]",
+                "sampled_selfies": "[C][C][N]",
+                "action_token_ids": (4, 5),
+                "stop_token": None,
+                "termination_reason": "max_stage_new_tokens",
+            },
+        ]
+    )
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage", lambda *args, **kwargs: next(samples))
+
+    trajectories = sample_stage_trajectories_for_example(
+        DummyModel(),
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=GFlowNetRolloutConfig(
+            max_molecules_per_sequence=3,
+            append_probability=0.30,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandom([0.1]),
+    )
+
+    assert [trajectory.stage_index for trajectory in trajectories] == [1, 2]
+    assert sum(trajectory.stage_index == 2 for trajectory in trajectories) == 1
+
+
 def test_sample_stage_trajectories_for_example_uses_max_molecules_for_planned_stage_count(
     monkeypatch,
 ) -> None:
@@ -468,6 +600,63 @@ def test_sample_stage_trajectories_for_example_uses_max_molecules_for_planned_st
     )
 
     assert [trajectory.stage_index for trajectory in trajectories] == [1, 2, 3]
+
+
+def test_sample_stage_keeps_raw_action_ids_when_projection_is_invalid() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+        },
+    )
+
+    class DummyPolicyModel:
+        def __init__(self) -> None:
+            self.config = SimpleNamespace(eos_token_id=99)
+
+        def __call__(
+            self,
+            *,
+            input_ids: torch.Tensor,
+            attention_mask: torch.Tensor,
+            decoder_input_ids: torch.Tensor,
+            return_dict: bool,
+        ) -> SimpleNamespace:
+            del input_ids, attention_mask, return_dict
+            logits = torch.full((1, decoder_input_ids.size(1), 8), -20.0)
+            current_length = decoder_input_ids.size(1)
+            if current_length == 1:
+                logits[:, -1, 1] = 10.0
+            else:
+                logits[:, -1, 2] = 10.0
+            return SimpleNamespace(logits=logits)
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = DummyPolicyModel()
+
+    stage_sample = sample_stage(
+        DummyModel(),
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(max_stage_new_tokens=2, top_p=1.0),
+    )
+
+    assert stage_sample["action_token_ids"] == (1, 2)
+    assert stage_sample["sampled_selfies"] is None
+    assert stage_sample["stop_token"] is None
+    assert stage_sample["termination_reason"] == "max_stage_new_tokens"
+    assert stage_sample["metadata"]["raw_action_token_ids"] == (1, 2)
+    assert stage_sample["metadata"]["used_raw_action_ids_for_invalid_projection"] is True
+    assert stage_sample["metadata"]["projection_failure_reason"] == "invalid_raw_stage_text"
 
 
 def test_sample_stage_enforces_bom_and_masks_language_tokens() -> None:

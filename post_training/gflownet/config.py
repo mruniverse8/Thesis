@@ -15,7 +15,7 @@ class GFlowNetRolloutConfig:
     temperature: float = 0.8
     top_p: float = 0.95
     constrained_decoding: bool = True
-    terminate_on_invalid_stage: bool = True
+    terminate_on_invalid_stage: bool = False
     append_probability: float = 0.30
     stage_separator: str = STAGE_SEPARATOR
     selfies_dict_path: str = "molecules/dict/selfies_dict.txt"
