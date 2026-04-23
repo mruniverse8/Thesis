@@ -1,6 +1,14 @@
 """Stage-local GFlowNet stage for post-training."""
 
-from .buffer import OnPolicyBatch, TrajectoryReplayBuffer
+from .buffer import (
+    OnPolicyBatch,
+    PriorityReplayBuffer,
+    ReplayBuffer,
+    ReplaySampleBatch,
+    TrajectoryReplayBuffer,
+    UniformReplayBuffer,
+    build_replay_buffer,
+)
 from .config import GFlowNetConfig, GFlowNetRolloutConfig, ReplayConfig, build_gflownet_config
 from .losses import (
     detailed_balance_loss,
@@ -25,11 +33,16 @@ __all__ = [
     "GFlowNetModel",
     "GFlowNetRolloutConfig",
     "OnPolicyBatch",
+    "PriorityReplayBuffer",
+    "ReplayBuffer",
     "ReplayConfig",
+    "ReplaySampleBatch",
     "SampledStageTrajectory",
     "ScoredStageTrajectory",
     "StageRewardSummary",
     "TrajectoryReplayBuffer",
+    "UniformReplayBuffer",
+    "build_replay_buffer",
     "build_gflownet_config",
     "build_prefix_states",
     "build_reward_config",

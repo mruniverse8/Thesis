@@ -52,6 +52,7 @@ _STAGE_ROLLOUT_METRIC_KEYS = frozenset(
         "max_planned_stage_count",
         "mean_realized_stage_count",
         "max_realized_stage_count",
+        "rollout_append_probability",
     }
 )
 _OPTIMIZER_METRIC_KEYS = frozenset(
@@ -69,7 +70,12 @@ _OPTIMIZER_METRIC_KEYS = frozenset(
         "standardized_advantage_std",
         "mean_old_logprob",
         "mean_reference_logprob",
+        "configured_replay_fraction",
         "replay_fraction",
+        "replay_buffer_type",
+        "replay_top_reward_count",
+        "replay_hard_positive_count",
+        "replay_hard_negative_count",
         "replay_size",
         "replay_total_action_tokens",
         "mean_log_pf_token",

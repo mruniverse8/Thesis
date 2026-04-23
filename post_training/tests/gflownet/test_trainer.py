@@ -34,7 +34,7 @@ def _make_sampled_trajectory(
         target_selfies_list=target_selfies_list,
         stage_index=stage_index,
         decoder_prefix_text="",
-        previous_valid_selfies=(),
+        previous_sampled_selfies=(),
         stage_text="<bom>[C][C][O]<eom>",
         sampled_selfies="[C][C][O]",
         action_token_ids=action_token_ids,
@@ -73,7 +73,11 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
             diagnostic_log_every_iterations=1,
             trajectory_preview_every_iterations=1,
             trajectory_preview_num_samples=3,
-            replay=ReplayConfig(capacity=8, replay_batch_size=1, max_total_action_tokens=32),
+            replay=ReplayConfig(
+                capacity=8,
+                replay_fraction=0.2,
+                max_total_action_tokens=32,
+            ),
         ),
         device=torch.device("cpu"),
     )
@@ -139,8 +143,15 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
 
     assert metrics["num_on_policy_trajectories"] == 4.0
     assert metrics["num_replay_trajectories"] == 1.0
+    assert metrics["configured_replay_fraction"] == pytest.approx(0.2)
+    assert metrics["replay_fraction"] == pytest.approx(0.2)
+    assert metrics["replay_buffer_type"] == "priority"
+    assert metrics["replay_top_reward_count"] == pytest.approx(1.0)
+    assert metrics["replay_hard_positive_count"] == pytest.approx(0.0)
+    assert metrics["replay_hard_negative_count"] == pytest.approx(0.0)
     assert metrics["replay_size"] == 5.0
     assert metrics["replay_total_action_tokens"] == 12.0
+    assert metrics["rollout_append_probability"] == pytest.approx(0.30)
     assert metrics["mean_stage_reward"] == pytest.approx((2.0 + 3.0 + 1.0e-4 + 4.0) / 4.0)
     assert metrics["valid_fraction"] == pytest.approx(0.75)
     assert metrics["mean_num_actions"] == pytest.approx(2.5)
@@ -150,13 +161,13 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     assert metrics["termination_fraction_max_stage_new_tokens"] == pytest.approx(0.25)
     assert metrics["num_rollouts"] == pytest.approx(3.0)
     assert metrics["max_stage_index"] == pytest.approx(2.0)
-    assert metrics["mean_planned_stage_count"] == pytest.approx(2.0)
-    assert metrics["max_planned_stage_count"] == pytest.approx(3.0)
+    assert metrics["mean_planned_stage_count"] == pytest.approx(8.0)
+    assert metrics["max_planned_stage_count"] == pytest.approx(8.0)
     assert metrics["mean_realized_stage_count"] == pytest.approx(4.0 / 3.0)
     assert metrics["max_realized_stage_count"] == pytest.approx(2.0)
-    assert metrics["fraction_rollouts_planned_stage_2_plus"] == pytest.approx(2.0 / 3.0)
+    assert metrics["fraction_rollouts_planned_stage_2_plus"] == pytest.approx(1.0)
     assert metrics["fraction_rollouts_reaching_stage_2"] == pytest.approx(1.0 / 3.0)
-    assert metrics["fraction_rollouts_reaching_planned_stage_count"] == pytest.approx(2.0 / 3.0)
+    assert metrics["fraction_rollouts_reaching_planned_stage_count"] == pytest.approx(0.0)
     assert metrics["rollout_stage_count_1_fraction"] == pytest.approx(2.0 / 3.0)
     assert metrics["rollout_stage_count_2_fraction"] == pytest.approx(1.0 / 3.0)
     assert metrics["invalid_reward_floor_fraction"] == pytest.approx(0.25)

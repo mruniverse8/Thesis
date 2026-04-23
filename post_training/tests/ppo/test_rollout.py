@@ -9,11 +9,12 @@ from transformers import T5Config, T5ForConditionalGeneration
 from src.constants import EOM_TOKEN
 
 from post_training.ppo.config import RolloutGenerationConfig
-from post_training.ppo.rollout import compute_action_stats, sample_stage
+from post_training.ppo.rollout import compute_action_stats, sample_rollout_for_example, sample_stage
 from post_training.shared.decoding import (
     StageTokenConstraints,
     mask_logits_to_allowed_token_ids,
 )
+from post_training.shared.sequence import build_stage_prefix
 
 
 def _compute_action_stats_naively(
@@ -217,6 +218,30 @@ class DummyTokenizer:
         return int(self.token_to_id[token])
 
 
+class FixedRandom:
+    def __init__(self, values: list[float]) -> None:
+        self._values = list(values)
+
+    def random(self) -> float:
+        if not self._values:
+            raise AssertionError("No more RNG values were available.")
+        return float(self._values.pop(0))
+
+
+def _patch_rollout_encoders(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "post_training.ppo.rollout.encode_prompt",
+        lambda *args, **kwargs: {
+            "input_ids": torch.tensor([[1]], dtype=torch.long),
+            "attention_mask": torch.tensor([[1]], dtype=torch.long),
+        },
+    )
+    monkeypatch.setattr(
+        "post_training.ppo.rollout.encode_decoder_prefix",
+        lambda *args, **kwargs: torch.tensor([[0]], dtype=torch.long),
+    )
+
+
 def test_sample_stage_enforces_bom_and_masks_language_tokens() -> None:
     tokenizer = DummyTokenizer(
         {
@@ -364,3 +389,344 @@ def test_sample_stage_projects_explicit_hydrogens_to_no_h_action_ids() -> None:
     assert stage_sample["metadata"]["projection_changed"] is True
     assert stage_sample["metadata"]["projection_failure_reason"] is None
     assert len(stage_sample["metadata"]["raw_action_token_ids"]) > len(stage_sample["action_token_ids"])
+
+
+def test_sample_rollout_for_example_continues_after_invalid_stage_when_sampling_stops_normally(
+    monkeypatch,
+) -> None:
+    class DummyPolicyValueModel:
+        def __init__(self) -> None:
+            self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+
+        def compute_values(self, **kwargs) -> torch.Tensor:
+            del kwargs
+            return torch.tensor([0.0], dtype=torch.float32)
+
+    samples = iter(
+        [
+            {
+                "stage_text": "<eom>",
+                "sampled_selfies": None,
+                "action_token_ids": (),
+                "action_logprob_sum": 0.0,
+                "entropy_sum": 0.0,
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+                "metadata": {},
+            },
+            {
+                "stage_text": "<bom>[C][C][N]<eom>",
+                "sampled_selfies": "[C][C][N]",
+                "action_token_ids": [4, 5],
+                "action_logprob_sum": 0.0,
+                "entropy_sum": 0.0,
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+                "metadata": {},
+            },
+        ]
+    )
+
+    def fake_reward_breakdown(candidate_selfies, *, targets, previous_candidates, config):
+        del targets, previous_candidates, config
+        is_valid = bool(candidate_selfies)
+        reward = 2.0 if is_valid else 1.0e-4
+        return SimpleNamespace(
+            amplified_reward=reward,
+            total_reward=reward,
+            match=SimpleNamespace(reward=reward / 2.0),
+            diversity=SimpleNamespace(reward=0.0),
+            is_duplicate=False,
+            candidate=SimpleNamespace(is_valid=is_valid, canonical_smiles="C"),
+        )
+
+    _patch_rollout_encoders(monkeypatch)
+    monkeypatch.setattr("post_training.ppo.rollout.sample_stage", lambda *args, **kwargs: next(samples))
+    monkeypatch.setattr(
+        "post_training.ppo.rollout.compute_action_stats",
+        lambda *args, **kwargs: (torch.zeros(()), torch.zeros(())),
+    )
+    monkeypatch.setattr("post_training.ppo.rollout.score_stage_reward", fake_reward_breakdown)
+
+    trajectories = sample_rollout_for_example(
+        DummyPolicyValueModel(),
+        object(),
+        object(),
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=RolloutGenerationConfig(
+            max_molecules_per_sequence=2,
+            append_probability=1.0,
+        ),
+        device=torch.device("cpu"),
+        rng=FixedRandom([0.0]),
+    )
+
+    assert len(trajectories) == 2
+    assert trajectories[0].is_valid is False
+    assert trajectories[1].decoder_prefix_text == ""
+
+
+def test_sample_rollout_for_example_trusts_invalid_sampled_selfies_for_prefix_history(
+    monkeypatch,
+) -> None:
+    class DummyPolicyValueModel:
+        def __init__(self) -> None:
+            self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+
+        def compute_values(self, **kwargs) -> torch.Tensor:
+            del kwargs
+            return torch.tensor([0.0], dtype=torch.float32)
+
+    samples = iter(
+        [
+            {
+                "stage_text": "<bom>[C][C][O]<eom>",
+                "sampled_selfies": "[C][C][O]",
+                "action_token_ids": [1, 2],
+                "action_logprob_sum": 0.0,
+                "entropy_sum": 0.0,
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+                "metadata": {},
+            },
+            {
+                "stage_text": "<bom>[C][C][N]<eom>",
+                "sampled_selfies": "[C][C][N]",
+                "action_token_ids": [4, 5],
+                "action_logprob_sum": 0.0,
+                "entropy_sum": 0.0,
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+                "metadata": {},
+            },
+        ]
+    )
+
+    def fake_reward_breakdown(candidate_selfies, *, targets, previous_candidates, config):
+        del targets, config
+        is_valid = candidate_selfies == "[C][C][N]"
+        reward = 2.0 if is_valid else 1.0e-4
+        return SimpleNamespace(
+            amplified_reward=reward,
+            total_reward=reward,
+            match=SimpleNamespace(reward=reward / 2.0),
+            diversity=SimpleNamespace(reward=0.0),
+            is_duplicate=False,
+            candidate=SimpleNamespace(is_valid=is_valid, canonical_smiles="C"),
+            previous_candidates=tuple(previous_candidates),
+        )
+
+    _patch_rollout_encoders(monkeypatch)
+    monkeypatch.setattr("post_training.ppo.rollout.sample_stage", lambda *args, **kwargs: next(samples))
+    monkeypatch.setattr(
+        "post_training.ppo.rollout.compute_action_stats",
+        lambda *args, **kwargs: (torch.zeros(()), torch.zeros(())),
+    )
+    monkeypatch.setattr("post_training.ppo.rollout.score_stage_reward", fake_reward_breakdown)
+
+    trajectories = sample_rollout_for_example(
+        DummyPolicyValueModel(),
+        object(),
+        object(),
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=RolloutGenerationConfig(
+            max_molecules_per_sequence=2,
+            append_probability=1.0,
+        ),
+        device=torch.device("cpu"),
+        rng=FixedRandom([0.0]),
+    )
+
+    assert len(trajectories) == 2
+    assert trajectories[0].is_valid is False
+    assert trajectories[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]"])
+
+
+def test_sample_rollout_for_example_appends_stage_two_plus_only_when_probability_allows_it(
+    monkeypatch,
+) -> None:
+    class DummyPolicyValueModel:
+        def __init__(self) -> None:
+            self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+
+        def compute_values(self, **kwargs) -> torch.Tensor:
+            del kwargs
+            return torch.tensor([0.0], dtype=torch.float32)
+
+    base_samples = [
+        {
+            "stage_text": "<bom>[C][C][O]<eom>",
+            "sampled_selfies": "[C][C][O]",
+            "action_token_ids": [1, 2],
+            "action_logprob_sum": 0.0,
+            "entropy_sum": 0.0,
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+            "metadata": {},
+        },
+        {
+            "stage_text": "<bom>[C][C][N]<eom>",
+            "sampled_selfies": "[C][C][N]",
+            "action_token_ids": [4, 5],
+            "action_logprob_sum": 0.0,
+            "entropy_sum": 0.0,
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+            "metadata": {},
+        },
+        {
+            "stage_text": "<bom>[C][O][O]<eom>",
+            "sampled_selfies": "[C][O][O]",
+            "action_token_ids": [6, 7],
+            "action_logprob_sum": 0.0,
+            "entropy_sum": 0.0,
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+            "metadata": {},
+        },
+    ]
+
+    def fake_reward_breakdown(candidate_selfies, *, targets, previous_candidates, config):
+        del targets, previous_candidates, config
+        return SimpleNamespace(
+            amplified_reward=2.0,
+            total_reward=2.0,
+            match=SimpleNamespace(reward=1.0),
+            diversity=SimpleNamespace(reward=0.0),
+            is_duplicate=False,
+            candidate=SimpleNamespace(is_valid=bool(candidate_selfies), canonical_smiles="C"),
+        )
+
+    def run_with_rng(rng_values: list[float]) -> list:
+        samples = iter(base_samples)
+        _patch_rollout_encoders(monkeypatch)
+        monkeypatch.setattr("post_training.ppo.rollout.sample_stage", lambda *args, **kwargs: next(samples))
+        monkeypatch.setattr(
+            "post_training.ppo.rollout.compute_action_stats",
+            lambda *args, **kwargs: (torch.zeros(()), torch.zeros(())),
+        )
+        monkeypatch.setattr("post_training.ppo.rollout.score_stage_reward", fake_reward_breakdown)
+        return sample_rollout_for_example(
+            DummyPolicyValueModel(),
+            object(),
+            object(),
+            {
+                "id": "example-1",
+                "prompt": "prompt",
+                "description": "description",
+                "target_selfies_list": ["[C][C][O]", "[C][C][N]", "[C][O][O]"],
+            },
+            rollout_id="rollout-1",
+            generation_config=RolloutGenerationConfig(
+                max_molecules_per_sequence=3,
+                append_probability=0.30,
+            ),
+            device=torch.device("cpu"),
+            rng=FixedRandom(rng_values),
+        )
+
+    appended = run_with_rng([0.1, 0.1])
+    assert [trajectory.stage_index for trajectory in appended] == [1, 2, 3]
+
+    skipped = run_with_rng([0.9, 0.1])
+    assert [trajectory.stage_index for trajectory in skipped] == [1, 3]
+    assert skipped[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]", "[C][C][N]"])
+
+
+def test_sample_rollout_for_example_uses_max_molecules_for_planned_stage_count(
+    monkeypatch,
+) -> None:
+    class DummyPolicyValueModel:
+        def __init__(self) -> None:
+            self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+
+        def compute_values(self, **kwargs) -> torch.Tensor:
+            del kwargs
+            return torch.tensor([0.0], dtype=torch.float32)
+
+    samples = iter(
+        [
+            {
+                "stage_text": "<bom>[C][C][O]<eom>",
+                "sampled_selfies": "[C][C][O]",
+                "action_token_ids": [1, 2],
+                "action_logprob_sum": 0.0,
+                "entropy_sum": 0.0,
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+                "metadata": {},
+            },
+            {
+                "stage_text": "<bom>[C][C][N]<eom>",
+                "sampled_selfies": "[C][C][N]",
+                "action_token_ids": [4, 5],
+                "action_logprob_sum": 0.0,
+                "entropy_sum": 0.0,
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+                "metadata": {},
+            },
+            {
+                "stage_text": "<bom>[C][O][O]<eom>",
+                "sampled_selfies": "[C][O][O]",
+                "action_token_ids": [6, 7],
+                "action_logprob_sum": 0.0,
+                "entropy_sum": 0.0,
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+                "metadata": {},
+            },
+        ]
+    )
+
+    def fake_reward_breakdown(candidate_selfies, *, targets, previous_candidates, config):
+        del targets, previous_candidates, config
+        return SimpleNamespace(
+            amplified_reward=2.0,
+            total_reward=2.0,
+            match=SimpleNamespace(reward=1.0),
+            diversity=SimpleNamespace(reward=0.0),
+            is_duplicate=False,
+            candidate=SimpleNamespace(is_valid=bool(candidate_selfies), canonical_smiles="C"),
+        )
+
+    _patch_rollout_encoders(monkeypatch)
+    monkeypatch.setattr("post_training.ppo.rollout.sample_stage", lambda *args, **kwargs: next(samples))
+    monkeypatch.setattr(
+        "post_training.ppo.rollout.compute_action_stats",
+        lambda *args, **kwargs: (torch.zeros(()), torch.zeros(())),
+    )
+    monkeypatch.setattr("post_training.ppo.rollout.score_stage_reward", fake_reward_breakdown)
+
+    trajectories = sample_rollout_for_example(
+        DummyPolicyValueModel(),
+        object(),
+        object(),
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=RolloutGenerationConfig(
+            max_molecules_per_sequence=3,
+            append_probability=1.0,
+        ),
+        device=torch.device("cpu"),
+        rng=FixedRandom([0.0, 0.0]),
+    )
+
+    assert [trajectory.stage_index for trajectory in trajectories] == [1, 2, 3]

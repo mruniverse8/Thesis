@@ -19,12 +19,18 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
             "rollout": {
                 "max_stage_new_tokens": 96,
                 "max_molecules_per_sequence": 4,
+                "append_probability": 0.6,
             },
             "replay": {
+                "enabled": True,
+                "buffer_type": "uniform",
                 "capacity": 128,
-                "replay_batch_size": 16,
+                "replay_fraction": 0.2,
                 "max_total_action_tokens": 4096,
                 "with_replacement": True,
+                "top_reward_fraction": 0.4,
+                "hard_positive_fraction": 0.3,
+                "hard_negative_fraction": 0.3,
             },
         }
     )
@@ -36,10 +42,29 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.trajectory_preview_max_chars == 320
     assert config.rollout.max_stage_new_tokens == 96
     assert config.rollout.max_molecules_per_sequence == 4
+    assert config.rollout.append_probability == 0.6
+    assert config.replay.enabled is True
+    assert config.replay.buffer_type == "uniform"
     assert config.replay.capacity == 128
-    assert config.replay.replay_batch_size == 16
+    assert config.replay.replay_fraction == 0.2
     assert config.replay.max_total_action_tokens == 4096
     assert config.replay.with_replacement is True
+    assert config.replay.top_reward_fraction == 0.4
+    assert config.replay.hard_positive_fraction == 0.3
+    assert config.replay.hard_negative_fraction == 0.3
+
+
+def test_gflownet_config_from_dict_keeps_legacy_replay_batch_size_when_fraction_is_absent() -> None:
+    config = GFlowNetConfig.from_dict(
+        {
+            "replay": {
+                "replay_batch_size": 16,
+            }
+        }
+    )
+
+    assert config.replay.replay_fraction is None
+    assert config.replay.replay_batch_size == 16
 
 
 def test_gflownet_config_from_dict_accepts_subtb() -> None:
@@ -76,7 +101,18 @@ def test_gflownet_rollout_defaults_enable_constrained_decoding_and_tighter_sampl
     assert config.rollout.temperature == 0.8
     assert config.rollout.top_p == 0.95
     assert config.rollout.constrained_decoding is True
+    assert config.rollout.append_probability == 0.30
+    assert config.rollout.terminate_on_invalid_stage is True
     assert config.rollout.selfies_dict_path == "molecules/dict/selfies_dict.txt"
+    assert config.replay.enabled is True
+    assert config.replay.buffer_type == "priority"
+    assert config.replay.replay_fraction == 0.25
+
+
+def test_gflownet_config_normalizes_invalid_stage_termination_to_true() -> None:
+    config = GFlowNetConfig.from_dict({"rollout": {"terminate_on_invalid_stage": False}})
+
+    assert config.rollout.terminate_on_invalid_stage is True
 
 
 def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
@@ -93,6 +129,7 @@ def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
     assert config.use_lora is False
     assert config.batch_size == 32
     assert config.rollout.max_source_length == 384
+    assert config.replay.capacity == 256
     assert config.replay.max_total_action_tokens == 50_000
 
 

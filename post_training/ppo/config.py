@@ -18,6 +18,7 @@ class RolloutGenerationConfig:
     top_p: float = 0.95
     constrained_decoding: bool = True
     terminate_on_invalid_stage: bool = True
+    append_probability: float = 0.30
     stage_separator: str = STAGE_SEPARATOR
     selfies_dict_path: str = "molecules/dict/selfies_dict.txt"
 
@@ -156,6 +157,18 @@ class PPOConfig:
                         "terminate_on_invalid_stage",
                         RolloutGenerationConfig.terminate_on_invalid_stage,
                     )
+                ),
+                append_probability=max(
+                    0.0,
+                    min(
+                        float(
+                            rollout_payload.get(
+                                "append_probability",
+                                RolloutGenerationConfig.append_probability,
+                            )
+                        ),
+                        1.0,
+                    ),
                 ),
                 stage_separator=str(
                     rollout_payload.get("stage_separator", RolloutGenerationConfig.stage_separator)

@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from post_training.ppo.config import PPOConfig, StageTrajectory
@@ -34,6 +35,7 @@ def test_ppo_config_from_dict_reads_rollout_section_and_ignores_old_separator_ke
             "rollout": {
                 "max_stage_new_tokens": 16,
                 "max_molecules_per_sequence": 4,
+                "append_probability": 0.6,
                 "molecule_separator_token": "<mol_sep>",
             },
         }
@@ -42,6 +44,7 @@ def test_ppo_config_from_dict_reads_rollout_section_and_ignores_old_separator_ke
     assert config.output_dir == "outputs/test"
     assert config.rollout.max_stage_new_tokens == 16
     assert config.rollout.max_molecules_per_sequence == 4
+    assert config.rollout.append_probability == pytest.approx(0.6)
     assert config.rollout.stage_separator == " "
 
 
@@ -72,6 +75,7 @@ def test_ppo_rollout_defaults_enable_constrained_decoding_and_tighter_sampling()
     assert config.rollout.temperature == 0.8
     assert config.rollout.top_p == 0.95
     assert config.rollout.constrained_decoding is True
+    assert config.rollout.append_probability == pytest.approx(0.30)
     assert config.rollout.selfies_dict_path == "molecules/dict/selfies_dict.txt"
 
 

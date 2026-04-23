@@ -28,7 +28,7 @@ from post_training.shared.diagnostics import (
 )
 from post_training.sft_multi.dataset import MultiMoleculeDataset
 
-from .buffer import OnPolicyBatch, TrajectoryReplayBuffer
+from .buffer import OnPolicyBatch, ReplaySampleBatch, build_replay_buffer
 from .checkpointing import (
     append_iteration_diagnostics,
     append_iteration_diagnostics_categorized,
@@ -76,6 +76,24 @@ def _tensor_std(values: torch.Tensor) -> float:
     return float(values.std(unbiased=False).item())
 
 
+def _compute_replay_target_count(
+    *,
+    on_policy_count: int,
+    replay_fraction: float | None,
+    legacy_replay_batch_size: int,
+) -> int:
+    if on_policy_count <= 0:
+        return 0
+    if replay_fraction is not None:
+        if replay_fraction <= 0.0:
+            return 0
+        return max(
+            0,
+            int(round(on_policy_count * replay_fraction / max(1.0 - replay_fraction, 1.0e-6))),
+        )
+    return max(0, int(legacy_replay_batch_size))
+
+
 class MultiMoleculeGFlowNetTrainer:
     def __init__(
         self,
@@ -107,14 +125,20 @@ class MultiMoleculeGFlowNetTrainer:
             lr=self.config.learning_rate,
         )
         self.replay_buffer = (
-            TrajectoryReplayBuffer(
-                self.config.replay.capacity,
+            build_replay_buffer(
+                capacity=self.config.replay.capacity,
                 max_total_action_tokens=self.config.replay.max_total_action_tokens,
+                buffer_type=self.config.replay.buffer_type,
+                invalid_terminal_reward=self.config.invalid_terminal_reward,
+                top_reward_fraction=self.config.replay.top_reward_fraction,
+                hard_positive_fraction=self.config.replay.hard_positive_fraction,
+                hard_negative_fraction=self.config.replay.hard_negative_fraction,
             )
-            if self.config.replay.capacity > 0
+            if self.config.replay.enabled and self.config.replay.capacity > 0
             else None
         )
         self.replay_rng = random.Random(0)
+        self.rollout_rng = random.Random(0)
         self.best_objective_loss: float | None = None
         self.best_checkpoint_iteration: int | None = None
         self.best_checkpoint_dir: str | None = None
@@ -139,6 +163,7 @@ class MultiMoleculeGFlowNetTrainer:
                     reward_config=self.reward_config,
                     invalid_terminal_reward=self.config.invalid_terminal_reward,
                     device=self.device,
+                    rng=self.rollout_rng,
                 )
             )
         return trajectories
@@ -273,11 +298,21 @@ class MultiMoleculeGFlowNetTrainer:
                 "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
                 "num_on_policy_trajectories": 0.0,
                 "num_replay_trajectories": 0.0,
+                "configured_replay_fraction": float(self.config.replay.replay_fraction or 0.0),
                 "replay_fraction": 0.0,
+                "replay_buffer_type": (
+                    str(self.config.replay.buffer_type)
+                    if self.replay_buffer is not None
+                    else "disabled"
+                ),
+                "replay_top_reward_count": 0.0,
+                "replay_hard_positive_count": 0.0,
+                "replay_hard_negative_count": 0.0,
                 "replay_size": float(len(self.replay_buffer) if self.replay_buffer is not None else 0),
                 "replay_total_action_tokens": float(
                     self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0
                 ),
+                "rollout_append_probability": float(self.config.rollout.append_probability),
                 "sampling_duration_sec": sampling_duration_sec,
                 "replay_sampling_duration_sec": 0.0,
                 "scoring_duration_sec": 0.0,
@@ -311,14 +346,21 @@ class MultiMoleculeGFlowNetTrainer:
                 categorized_diagnostic_metrics=categorized_diagnostic_metrics,
             )
 
+        replay_sample = ReplaySampleBatch(())
         replay_trajectories: list[SampledStageTrajectory] = []
         replay_sampling_start = perf_counter()
-        if self.replay_buffer is not None and self.config.replay.replay_batch_size > 0:
-            replay_trajectories = self.replay_buffer.sample(
-                self.config.replay.replay_batch_size,
+        replay_target_count = _compute_replay_target_count(
+            on_policy_count=len(on_policy_trajectories),
+            replay_fraction=self.config.replay.replay_fraction,
+            legacy_replay_batch_size=self.config.replay.replay_batch_size,
+        )
+        if self.replay_buffer is not None and replay_target_count > 0:
+            replay_sample = self.replay_buffer.sample(
+                replay_target_count,
                 rng=self.replay_rng,
                 with_replacement=self.config.replay.with_replacement,
             )
+            replay_trajectories = list(replay_sample.trajectories)
         replay_sampling_duration_sec = perf_counter() - replay_sampling_start
 
         if self.replay_buffer is not None:
@@ -410,11 +452,21 @@ class MultiMoleculeGFlowNetTrainer:
             "mean_stage_index": on_policy_batch.mean_stage_index(),
             "num_on_policy_trajectories": float(len(on_policy_trajectories)),
             "num_replay_trajectories": float(len(replay_trajectories)),
+            "configured_replay_fraction": float(self.config.replay.replay_fraction or 0.0),
             "replay_fraction": float(len(replay_trajectories) / len(optimization_trajectories)),
+            "replay_buffer_type": (
+                str(self.config.replay.buffer_type)
+                if self.replay_buffer is not None
+                else "disabled"
+            ),
+            "replay_top_reward_count": float(replay_sample.top_reward_count),
+            "replay_hard_positive_count": float(replay_sample.hard_positive_count),
+            "replay_hard_negative_count": float(replay_sample.hard_negative_count),
             "replay_size": float(len(self.replay_buffer) if self.replay_buffer is not None else 0),
             "replay_total_action_tokens": float(
                 self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0
             ),
+            "rollout_append_probability": float(self.config.rollout.append_probability),
             "grad_norm": float(grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm),
             "mean_log_pf_token": _tensor_mean(all_log_pf_tokens),
             "mean_log_pb_token": _tensor_mean(all_log_pb_tokens),

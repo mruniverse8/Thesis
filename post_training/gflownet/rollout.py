@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from typing import Any, Sequence
 
 import torch
@@ -103,7 +104,7 @@ def build_sampled_stage_trajectory_from_generation(
     rollout_id: str,
     stage_index: int,
     decoder_prefix_text: str,
-    previous_valid_selfies: Sequence[str],
+    previous_sampled_selfies: Sequence[str],
     stage_text: str,
     sampled_selfies: str | None,
     action_token_ids: Sequence[int],
@@ -120,7 +121,7 @@ def build_sampled_stage_trajectory_from_generation(
     reward_summary = score_stage_terminal_reward(
         sampled_selfies,
         targets=target_selfies_list,
-        previous_candidates=tuple(str(item) for item in previous_valid_selfies),
+        previous_candidates=tuple(str(item) for item in previous_sampled_selfies),
         num_prefix_states=len(action_token_ids) + 1,
         reward_config=reward_config,
         invalid_terminal_reward=invalid_terminal_reward,
@@ -133,7 +134,7 @@ def build_sampled_stage_trajectory_from_generation(
         target_selfies_list=target_selfies_list,
         stage_index=stage_index,
         decoder_prefix_text=decoder_prefix_text,
-        previous_valid_selfies=tuple(str(item) for item in previous_valid_selfies),
+        previous_sampled_selfies=tuple(str(item) for item in previous_sampled_selfies),
         stage_text=stage_text,
         sampled_selfies=sampled_selfies,
         action_token_ids=tuple(int(token_id) for token_id in action_token_ids),
@@ -249,6 +250,7 @@ def sample_stage_trajectories_for_example(
     invalid_terminal_reward: float = 1.0e-4,
     device: torch.device,
     stage_token_constraints: StageTokenConstraints | None = None,
+    rng: random.Random | None = None,
 ) -> list[SampledStageTrajectory]:
     prompt_inputs = encode_prompt(
         tokenizer,
@@ -257,17 +259,15 @@ def sample_stage_trajectories_for_example(
         device=device,
     )
     decoder_start_token_id = int(model.policy_model.config.decoder_start_token_id)
-    target_selfies_list = tuple(str(item) for item in example["target_selfies_list"])
-    planned_stage_count = max(
-        1,
-        min(generation_config.max_molecules_per_sequence, len(target_selfies_list)),
-    )
+    planned_stage_count = max(1, int(generation_config.max_molecules_per_sequence))
 
-    previous_valid_selfies: list[str] = []
+    previous_sampled_selfies: list[str] = []
     trajectories: list[SampledStageTrajectory] = []
-    for stage_index in range(1, planned_stage_count + 1):
+    generator = rng or random
+    stage_index = 1
+    while stage_index <= planned_stage_count:
         prefix_text = build_stage_prefix(
-            previous_valid_selfies,
+            previous_sampled_selfies,
             separator_token=generation_config.stage_separator,
         )
         decoder_prefix_ids = encode_decoder_prefix(
@@ -290,7 +290,7 @@ def sample_stage_trajectories_for_example(
             rollout_id=rollout_id,
             stage_index=stage_index,
             decoder_prefix_text=prefix_text,
-            previous_valid_selfies=tuple(previous_valid_selfies),
+            previous_sampled_selfies=tuple(previous_sampled_selfies),
             stage_text=str(stage_sample["stage_text"]),
             sampled_selfies=stage_sample["sampled_selfies"],
             action_token_ids=stage_sample["action_token_ids"],
@@ -300,14 +300,17 @@ def sample_stage_trajectories_for_example(
             reward_config=reward_config,
             invalid_terminal_reward=invalid_terminal_reward,
         )
-        trajectories.append(trajectory)
+        if trajectory.sampled_selfies:
+            previous_sampled_selfies.append(trajectory.sampled_selfies)
 
-        if trajectory.sampled_selfies and trajectory.is_valid:
-            previous_valid_selfies.append(trajectory.sampled_selfies)
+        should_append = stage_index == 1 or (
+            float(generator.random()) < generation_config.append_probability
+        )
+        if should_append:
+            trajectories.append(trajectory)
 
         if trajectory.termination_reason != "stop_token":
             break
-        if generation_config.terminate_on_invalid_stage and not trajectory.is_valid:
-            break
+        stage_index += 1
 
     return trajectories

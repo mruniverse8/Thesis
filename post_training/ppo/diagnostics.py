@@ -137,10 +137,12 @@ def rollout_stage_metrics(
 
     for rollout in grouped_rollouts.values():
         ordered_rollout = sorted(rollout, key=lambda item: item.stage_index)
-        target_stage_count = max(1, len(ordered_rollout[0].target_selfies_list))
-        if max_molecules_per_sequence is not None:
-            target_stage_count = min(target_stage_count, int(max_molecules_per_sequence))
         realized_stage_count = len(ordered_rollout)
+        target_stage_count = (
+            max(1, int(max_molecules_per_sequence))
+            if max_molecules_per_sequence is not None
+            else max(1, realized_stage_count)
+        )
         planned_stage_counts.append(target_stage_count)
         realized_stage_counts.append(realized_stage_count)
         if target_stage_count >= 2:

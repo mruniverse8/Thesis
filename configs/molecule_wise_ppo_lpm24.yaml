@@ -62,6 +62,7 @@ ppo:
     max_sequence_length: 4096
     temperature: 0.8
     top_p: 0.95
+    append_probability: 0.30
     constrained_decoding: true
     stage_separator: " "
     selfies_dict_path: molecules/dict/selfies_dict.txt

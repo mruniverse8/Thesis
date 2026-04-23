@@ -53,10 +53,15 @@ gflownet:
   trajectory_preview_max_chars: 480
   invalid_terminal_reward: 1.0e-4
   replay:
-    capacity: 0
-    replay_batch_size: 0
+    enabled: true
+    buffer_type: priority
+    capacity: 256
+    replay_fraction: 0.25
     max_total_action_tokens: 50000
     with_replacement: false
+    top_reward_fraction: 0.50
+    hard_positive_fraction: 0.25
+    hard_negative_fraction: 0.25
   rollout:
     max_source_length: 512
     max_stage_new_tokens: 128
@@ -65,5 +70,6 @@ gflownet:
     temperature: 0.08
     top_p: 0.25
     constrained_decoding: true
+    append_probability: 0.30
     selfies_dict_path: molecules/dict/selfies_dict.txt
     terminate_on_invalid_stage: true

@@ -24,7 +24,7 @@ def _make_sampled_trajectory(
         target_selfies_list=target_selfies_list,
         stage_index=stage_index,
         decoder_prefix_text="",
-        previous_valid_selfies=(),
+        previous_sampled_selfies=(),
         stage_text="<bom>[C][C][O]<eom>",
         sampled_selfies="[C][C][O]" if is_valid else None,
         action_token_ids=action_token_ids,
@@ -101,14 +101,14 @@ def test_rollout_stage_metrics_capture_realized_lengths_and_stage_split_breakdow
 
     assert metrics["num_rollouts"] == pytest.approx(3.0)
     assert metrics["max_stage_index"] == pytest.approx(2.0)
-    assert metrics["mean_planned_stage_count"] == pytest.approx(2.0)
-    assert metrics["max_planned_stage_count"] == pytest.approx(3.0)
+    assert metrics["mean_planned_stage_count"] == pytest.approx(8.0)
+    assert metrics["max_planned_stage_count"] == pytest.approx(8.0)
     assert metrics["mean_realized_stage_count"] == pytest.approx(4.0 / 3.0)
     assert metrics["max_realized_stage_count"] == pytest.approx(2.0)
-    assert metrics["fraction_rollouts_planned_stage_2_plus"] == pytest.approx(2.0 / 3.0)
+    assert metrics["fraction_rollouts_planned_stage_2_plus"] == pytest.approx(1.0)
     assert metrics["fraction_rollouts_reaching_stage_2"] == pytest.approx(1.0 / 3.0)
     assert metrics["fraction_rollouts_reaching_stage_3_plus"] == pytest.approx(0.0)
-    assert metrics["fraction_rollouts_reaching_planned_stage_count"] == pytest.approx(2.0 / 3.0)
+    assert metrics["fraction_rollouts_reaching_planned_stage_count"] == pytest.approx(0.0)
     assert metrics["rollout_stage_count_1_fraction"] == pytest.approx(2.0 / 3.0)
     assert metrics["rollout_stage_count_2_fraction"] == pytest.approx(1.0 / 3.0)
     assert metrics["rollout_stage_count_3_plus_fraction"] == pytest.approx(0.0)

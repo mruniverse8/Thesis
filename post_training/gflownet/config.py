@@ -16,16 +16,23 @@ class GFlowNetRolloutConfig:
     top_p: float = 0.95
     constrained_decoding: bool = True
     terminate_on_invalid_stage: bool = True
+    append_probability: float = 0.30
     stage_separator: str = STAGE_SEPARATOR
     selfies_dict_path: str = "molecules/dict/selfies_dict.txt"
 
 
 @dataclass(frozen=True)
 class ReplayConfig:
-    capacity: int = 0
+    enabled: bool = True
+    buffer_type: str = "priority"
+    capacity: int = 256
+    replay_fraction: float | None = 0.25
     replay_batch_size: int = 0
     max_total_action_tokens: int = 50_000
     with_replacement: bool = False
+    top_reward_fraction: float = 0.50
+    hard_positive_fraction: float = 0.25
+    hard_negative_fraction: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -67,6 +74,30 @@ class GFlowNetConfig:
                 GFlowNetRolloutConfig.max_stage_new_tokens,
             ),
         )
+        replay_fraction_payload = replay_payload.get("replay_fraction")
+        legacy_replay_batch_size = max(
+            0,
+            int(
+                replay_payload.get(
+                    "replay_batch_size",
+                    ReplayConfig.replay_batch_size,
+                )
+            ),
+        )
+        if replay_fraction_payload is None and "replay_batch_size" in replay_payload:
+            replay_fraction: float | None = None
+        else:
+            replay_fraction = max(
+                0.0,
+                min(
+                    float(
+                        replay_fraction_payload
+                        if replay_fraction_payload is not None
+                        else ReplayConfig.replay_fraction
+                    ),
+                    1.0 - 1.0e-6,
+                ),
+            )
         return cls(
             output_dir=str(payload.get("output_dir", cls.output_dir)),
             gflownet_iterations=int(
@@ -175,11 +206,18 @@ class GFlowNetConfig:
                         GFlowNetRolloutConfig.constrained_decoding,
                     )
                 ),
-                terminate_on_invalid_stage=bool(
-                    rollout_payload.get(
-                        "terminate_on_invalid_stage",
-                        GFlowNetRolloutConfig.terminate_on_invalid_stage,
-                    )
+                terminate_on_invalid_stage=True,
+                append_probability=max(
+                    0.0,
+                    min(
+                        float(
+                            rollout_payload.get(
+                                "append_probability",
+                                GFlowNetRolloutConfig.append_probability,
+                            )
+                        ),
+                        1.0,
+                    ),
                 ),
                 stage_separator=str(
                     rollout_payload.get(
@@ -195,16 +233,16 @@ class GFlowNetConfig:
                 ),
             ),
             replay=ReplayConfig(
+                enabled=bool(replay_payload.get("enabled", ReplayConfig.enabled)),
+                buffer_type=str(
+                    replay_payload.get(
+                        "buffer_type",
+                        ReplayConfig.buffer_type,
+                    )
+                ).strip().lower(),
                 capacity=max(0, int(replay_payload.get("capacity", ReplayConfig.capacity))),
-                replay_batch_size=max(
-                    0,
-                    int(
-                        replay_payload.get(
-                            "replay_batch_size",
-                            ReplayConfig.replay_batch_size,
-                        )
-                    ),
-                ),
+                replay_fraction=replay_fraction,
+                replay_batch_size=legacy_replay_batch_size,
                 max_total_action_tokens=max(
                     1,
                     int(
@@ -219,6 +257,33 @@ class GFlowNetConfig:
                         "with_replacement",
                         ReplayConfig.with_replacement,
                     )
+                ),
+                top_reward_fraction=max(
+                    0.0,
+                    float(
+                        replay_payload.get(
+                            "top_reward_fraction",
+                            ReplayConfig.top_reward_fraction,
+                        )
+                    ),
+                ),
+                hard_positive_fraction=max(
+                    0.0,
+                    float(
+                        replay_payload.get(
+                            "hard_positive_fraction",
+                            ReplayConfig.hard_positive_fraction,
+                        )
+                    ),
+                ),
+                hard_negative_fraction=max(
+                    0.0,
+                    float(
+                        replay_payload.get(
+                            "hard_negative_fraction",
+                            ReplayConfig.hard_negative_fraction,
+                        )
+                    ),
                 ),
             ),
         )

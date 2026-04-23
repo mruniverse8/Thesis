@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import random
 from typing import Any, Sequence
 
 import torch
@@ -265,6 +266,7 @@ def sample_rollout_for_example(
     reward_config: RewardConfig | None = None,
     device: torch.device,
     stage_token_constraints: StageTokenConstraints | None = None,
+    rng: random.Random | None = None,
 ) -> list[StageTrajectory]:
     prompt_text = str(example["prompt"])
     description = str(example["description"])
@@ -278,14 +280,16 @@ def sample_rollout_for_example(
         device=device,
     )
     decoder_start_token_id = int(policy_model.policy_model.config.decoder_start_token_id)
-    planned_stage_count = max(1, min(generation_config.max_molecules_per_sequence, len(target_selfies_list)))
-    previous_selfies: list[str] = []
+    planned_stage_count = max(1, int(generation_config.max_molecules_per_sequence))
+    previous_sampled_selfies: list[str] = []
     trajectories: list[StageTrajectory] = []
     resolved_constraints = resolve_stage_token_constraints(policy_model, stage_token_constraints)
+    generator = rng or random
 
-    for stage_index in range(1, planned_stage_count + 1):
+    stage_index = 1
+    while stage_index <= planned_stage_count:
         prefix_text = build_stage_prefix(
-            previous_selfies,
+            previous_sampled_selfies,
             separator_token=generation_config.stage_separator,
         )
         decoder_prefix_ids = encode_decoder_prefix(
@@ -326,7 +330,7 @@ def sample_rollout_for_example(
         reward_breakdown = score_stage_reward(
             stage_sample["sampled_selfies"] or "",
             targets=target_selfies_list,
-            previous_candidates=previous_selfies,
+            previous_candidates=previous_sampled_selfies,
             config=reward_config,
         )
 
@@ -353,14 +357,17 @@ def sample_rollout_for_example(
             is_duplicate=reward_breakdown.is_duplicate,
             metadata=dict(stage_sample.get("metadata", {})),
         )
-        trajectories.append(trajectory)
+        if trajectory.sampled_selfies:
+            previous_sampled_selfies.append(trajectory.sampled_selfies)
 
-        if trajectory.sampled_selfies and trajectory.is_valid:
-            previous_selfies.append(trajectory.sampled_selfies)
+        should_append = stage_index == 1 or (
+            float(generator.random()) < generation_config.append_probability
+        )
+        if should_append:
+            trajectories.append(trajectory)
 
         if trajectory.termination_reason != "stop_token":
             break
-        if generation_config.terminate_on_invalid_stage and not trajectory.is_valid:
-            break
+        stage_index += 1
 
     return trajectories

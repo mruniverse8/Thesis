@@ -28,7 +28,7 @@ class SampledStageTrajectory:
     target_selfies_list: tuple[str, ...]
     stage_index: int
     decoder_prefix_text: str
-    previous_valid_selfies: tuple[str, ...]
+    previous_sampled_selfies: tuple[str, ...]
     stage_text: str
     sampled_selfies: str | None
     action_token_ids: tuple[int, ...]
@@ -80,7 +80,7 @@ class SampledStageTrajectory:
             "target_selfies_list": list(self.target_selfies_list),
             "stage_index": self.stage_index,
             "decoder_prefix_text": self.decoder_prefix_text,
-            "previous_valid_selfies": list(self.previous_valid_selfies),
+            "previous_sampled_selfies": list(self.previous_sampled_selfies),
             "stage_text": self.stage_text,
             "sampled_selfies": self.sampled_selfies,
             "action_token_ids": list(self.action_token_ids),
@@ -93,6 +93,10 @@ class SampledStageTrajectory:
             "is_duplicate": self.is_duplicate,
             "metadata": dict(self.metadata),
         }
+
+    @property
+    def previous_valid_selfies(self) -> tuple[str, ...]:
+        return self.previous_sampled_selfies
 
 
 @dataclass(frozen=True)
