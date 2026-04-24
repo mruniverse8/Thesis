@@ -63,8 +63,8 @@ def _compute_component(
     best_reference: str | None = None
 
     for index, reference in enumerate(references):
-        if not reference.is_valid:
-            continue
+        #if not reference.is_valid:
+        #    continue
         similarity = similarity_fn(candidate, reference)
         if similarity > best_similarity:
             best_similarity = similarity

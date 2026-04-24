@@ -12,6 +12,10 @@ class GFlowNetRolloutConfig:
     max_stage_new_tokens: int = 128
     max_molecules_per_sequence: int = 8
     max_sequence_length: int = 2560
+    decoding_strategy: str = "sample"
+    num_beams: int = 1
+    length_penalty: float = 1.0
+    early_stopping: bool = True
     temperature: float = 0.8
     top_p: float = 0.95
     constrained_decoding: bool = True
@@ -67,6 +71,14 @@ class GFlowNetConfig:
         objective = str(payload.get("objective", cls.objective)).strip().lower()
         if objective not in {"tb", "db", "subtb"}:
             raise ValueError("objective must be one of: tb, db, subtb.")
+        decoding_strategy = str(
+            rollout_payload.get(
+                "decoding_strategy",
+                GFlowNetRolloutConfig.decoding_strategy,
+            )
+        ).strip().lower()
+        if decoding_strategy not in {"sample", "beam"}:
+            raise ValueError("rollout.decoding_strategy must be one of: sample, beam.")
 
         max_stage_new_tokens = rollout_payload.get(
             "max_stage_new_tokens",
@@ -193,6 +205,31 @@ class GFlowNetConfig:
                             GFlowNetRolloutConfig.max_sequence_length,
                         )
                     ),
+                ),
+                decoding_strategy=decoding_strategy,
+                num_beams=max(
+                    1,
+                    int(
+                        rollout_payload.get(
+                            "num_beams",
+                            GFlowNetRolloutConfig.num_beams,
+                        )
+                    ),
+                ),
+                length_penalty=max(
+                    0.0,
+                    float(
+                        rollout_payload.get(
+                            "length_penalty",
+                            GFlowNetRolloutConfig.length_penalty,
+                        )
+                    ),
+                ),
+                early_stopping=bool(
+                    rollout_payload.get(
+                        "early_stopping",
+                        GFlowNetRolloutConfig.early_stopping,
+                    )
                 ),
                 temperature=float(
                     rollout_payload.get(

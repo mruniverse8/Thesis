@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 import random
 from typing import Any, Sequence
 
@@ -153,6 +154,251 @@ def build_sampled_stage_trajectory_from_generation(
     )
 
 
+@dataclass(frozen=True)
+class _BeamState:
+    decoder_input_ids: torch.Tensor
+    raw_action_token_ids: tuple[int, ...]
+    score: float = 0.0
+    stop_token: str | None = None
+    termination_reason: str = "max_stage_new_tokens"
+    generated_token_count: int = 0
+
+    @property
+    def is_finished(self) -> bool:
+        return self.stop_token is not None or self.termination_reason in {
+            "eos_token",
+            "max_sequence_length",
+        }
+
+
+def _normalized_beam_score(beam: _BeamState, *, length_penalty: float) -> float:
+    token_count = max(1, int(beam.generated_token_count))
+    return float(beam.score) / float(token_count**max(0.0, length_penalty))
+
+
+def _beam_rank_key(beam: _BeamState, *, length_penalty: float) -> tuple[float, bool, float]:
+    return (
+        _normalized_beam_score(beam, length_penalty=length_penalty),
+        beam.stop_token == EOM_TOKEN,
+        float(beam.score),
+    )
+
+
+def _select_top_beams(
+    beams: Sequence[_BeamState],
+    *,
+    num_beams: int,
+    length_penalty: float,
+) -> list[_BeamState]:
+    return sorted(
+        beams,
+        key=lambda beam: _beam_rank_key(beam, length_penalty=length_penalty),
+        reverse=True,
+    )[: max(1, int(num_beams))]
+
+
+def _build_stage_sample_from_generation(
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    raw_action_token_ids: Sequence[int],
+    stop_token: str | None,
+    termination_reason: str,
+    metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    eom_token_id = tokenizer.convert_tokens_to_ids(EOM_TOKEN)
+    raw_stage_token_ids = [int(token_id) for token_id in raw_action_token_ids]
+    if stop_token == EOM_TOKEN:
+        raw_stage_token_ids.append(int(eom_token_id))
+    raw_stage_text = (
+        tokenizer.decode(
+            raw_stage_token_ids,
+            skip_special_tokens=False,
+            clean_up_tokenization_spaces=True,
+        ).strip()
+        if raw_stage_token_ids
+        else ""
+    )
+    projection = project_sampled_stage_to_no_h(
+        tokenizer,
+        raw_stage_text,
+        drop_terminal_eom_from_action_ids=True,
+    )
+    action_token_ids = tuple(projection.action_token_ids)
+    used_raw_action_ids_for_invalid_projection = False
+    if projection.sampled_selfies is None and not action_token_ids:
+        action_token_ids = tuple(int(token_id) for token_id in raw_action_token_ids)
+        used_raw_action_ids_for_invalid_projection = bool(action_token_ids)
+
+    return {
+        "stage_text": projection.stage_text,
+        "sampled_selfies": projection.sampled_selfies,
+        "action_token_ids": action_token_ids,
+        "stop_token": stop_token,
+        "termination_reason": termination_reason,
+        "metadata": {
+            **projection.metadata,
+            **dict(metadata or {}),
+            "raw_action_token_ids": tuple(int(token_id) for token_id in raw_action_token_ids),
+            "used_raw_action_ids_for_invalid_projection": used_raw_action_ids_for_invalid_projection,
+        },
+    }
+
+
+def beam_search_stage(
+    model: GFlowNetModel,
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    decoder_prefix_ids: torch.Tensor,
+    generation_config: GFlowNetRolloutConfig,
+    stage_token_constraints: StageTokenConstraints | None = None,
+) -> dict[str, Any]:
+    eom_token_id = int(tokenizer.convert_tokens_to_ids(EOM_TOKEN))
+    eos_token_id = model.policy_model.config.eos_token_id
+    resolved_constraints = resolve_stage_token_constraints(model, stage_token_constraints)
+    num_beams = max(1, int(generation_config.num_beams))
+    length_penalty = max(0.0, float(generation_config.length_penalty))
+
+    beams: list[_BeamState] = [
+        _BeamState(
+            decoder_input_ids=decoder_prefix_ids.clone(),
+            raw_action_token_ids=(),
+        )
+    ]
+
+    with torch.no_grad():
+        for _ in range(generation_config.max_stage_new_tokens):
+            candidates: list[_BeamState] = []
+            for beam in beams:
+                if beam.is_finished:
+                    candidates.append(beam)
+                    continue
+
+                total_length = input_ids.size(1) + beam.decoder_input_ids.size(1)
+                if total_length >= generation_config.max_sequence_length:
+                    candidates.append(
+                        _BeamState(
+                            decoder_input_ids=beam.decoder_input_ids,
+                            raw_action_token_ids=beam.raw_action_token_ids,
+                            score=beam.score,
+                            stop_token=None,
+                            termination_reason="max_sequence_length",
+                            generated_token_count=beam.generated_token_count,
+                        )
+                    )
+                    continue
+
+                outputs = model.policy_model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    decoder_input_ids=beam.decoder_input_ids,
+                    return_dict=True,
+                )
+                next_logits = outputs.logits[:, -1, :] / max(
+                    float(generation_config.temperature),
+                    1.0e-6,
+                )
+                if resolved_constraints is not None and resolved_constraints.enabled:
+                    allowed_token_ids = resolved_constraints.allowed_token_ids_for_prefix(
+                        beam.raw_action_token_ids
+                    )
+                    next_logits = mask_logits_to_allowed_token_ids(
+                        next_logits,
+                        allowed_token_ids,
+                    )
+                    top_k = min(num_beams, len(allowed_token_ids))
+                else:
+                    top_k = min(num_beams, int(next_logits.size(-1)))
+
+                log_probs = torch.log_softmax(next_logits, dim=-1).squeeze(0)
+                top_log_probs, top_token_ids = torch.topk(log_probs, k=max(1, top_k))
+                for token_log_prob, token_id_tensor in zip(top_log_probs, top_token_ids):
+                    if not torch.isfinite(token_log_prob):
+                        continue
+
+                    token_id = int(token_id_tensor.item())
+                    next_score = float(beam.score) + float(token_log_prob.item())
+                    generated_token_count = int(beam.generated_token_count) + 1
+                    if token_id == eom_token_id:
+                        candidates.append(
+                            _BeamState(
+                                decoder_input_ids=beam.decoder_input_ids,
+                                raw_action_token_ids=beam.raw_action_token_ids,
+                                score=next_score,
+                                stop_token=EOM_TOKEN,
+                                termination_reason="stop_token",
+                                generated_token_count=generated_token_count,
+                            )
+                        )
+                        continue
+                    if eos_token_id is not None and token_id == int(eos_token_id):
+                        candidates.append(
+                            _BeamState(
+                                decoder_input_ids=beam.decoder_input_ids,
+                                raw_action_token_ids=beam.raw_action_token_ids,
+                                score=next_score,
+                                stop_token=tokenizer.eos_token,
+                                termination_reason="eos_token",
+                                generated_token_count=generated_token_count,
+                            )
+                        )
+                        continue
+
+                    next_token = torch.tensor(
+                        [[token_id]],
+                        dtype=torch.long,
+                        device=beam.decoder_input_ids.device,
+                    )
+                    candidates.append(
+                        _BeamState(
+                            decoder_input_ids=torch.cat(
+                                [beam.decoder_input_ids, next_token],
+                                dim=1,
+                            ),
+                            raw_action_token_ids=(*beam.raw_action_token_ids, token_id),
+                            score=next_score,
+                            stop_token=None,
+                            termination_reason="max_stage_new_tokens",
+                            generated_token_count=generated_token_count,
+                        )
+                    )
+
+            if not candidates:
+                break
+
+            beams = _select_top_beams(
+                candidates,
+                num_beams=num_beams,
+                length_penalty=length_penalty,
+            )
+            if generation_config.early_stopping and all(beam.is_finished for beam in beams):
+                break
+
+    ranked_beams = _select_top_beams(
+        beams,
+        num_beams=len(beams),
+        length_penalty=length_penalty,
+    )
+    best_beam = ranked_beams[0]
+    return _build_stage_sample_from_generation(
+        tokenizer,
+        raw_action_token_ids=best_beam.raw_action_token_ids,
+        stop_token=best_beam.stop_token,
+        termination_reason=best_beam.termination_reason,
+        metadata={
+            "decoding_strategy": "beam",
+            "num_beams": num_beams,
+            "beam_rank": 0,
+            "beam_score": float(best_beam.score),
+            "beam_normalized_score": _normalized_beam_score(
+                best_beam,
+                length_penalty=length_penalty,
+            ),
+        },
+    )
+
+
 def sample_stage(
     model: GFlowNetModel,
     tokenizer: PreTrainedTokenizerBase,
@@ -163,6 +409,18 @@ def sample_stage(
     generation_config: GFlowNetRolloutConfig,
     stage_token_constraints: StageTokenConstraints | None = None,
 ) -> dict[str, Any]:
+    decoding_strategy = str(generation_config.decoding_strategy).strip().lower()
+    if decoding_strategy == "beam" or generation_config.num_beams > 1:
+        return beam_search_stage(
+            model,
+            tokenizer,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            decoder_prefix_ids=decoder_prefix_ids,
+            generation_config=generation_config,
+            stage_token_constraints=stage_token_constraints,
+        )
+
     eom_token_id = tokenizer.convert_tokens_to_ids(EOM_TOKEN)
     eos_token_id = model.policy_model.config.eos_token_id
     resolved_constraints = resolve_stage_token_constraints(model, stage_token_constraints)
@@ -208,41 +466,12 @@ def sample_stage(
             raw_action_token_ids.append(next_token_id)
             current_decoder_input_ids = torch.cat([current_decoder_input_ids, next_token], dim=1)
 
-    raw_stage_token_ids = [*raw_action_token_ids]
-    if stop_token == EOM_TOKEN:
-        raw_stage_token_ids.append(int(eom_token_id))
-    raw_stage_text = (
-        tokenizer.decode(
-            raw_stage_token_ids,
-            skip_special_tokens=False,
-            clean_up_tokenization_spaces=True,
-        ).strip()
-        if raw_stage_token_ids
-        else ""
-    )
-    projection = project_sampled_stage_to_no_h(
+    return _build_stage_sample_from_generation(
         tokenizer,
-        raw_stage_text,
-        drop_terminal_eom_from_action_ids=True,
+        raw_action_token_ids=raw_action_token_ids,
+        stop_token=stop_token,
+        termination_reason=termination_reason,
     )
-    action_token_ids = tuple(projection.action_token_ids)
-    used_raw_action_ids_for_invalid_projection = False
-    if projection.sampled_selfies is None and not action_token_ids:
-        action_token_ids = tuple(raw_action_token_ids)
-        used_raw_action_ids_for_invalid_projection = bool(action_token_ids)
-
-    return {
-        "stage_text": projection.stage_text,
-        "sampled_selfies": projection.sampled_selfies,
-        "action_token_ids": action_token_ids,
-        "stop_token": stop_token,
-        "termination_reason": termination_reason,
-        "metadata": {
-            **projection.metadata,
-            "raw_action_token_ids": tuple(raw_action_token_ids),
-            "used_raw_action_ids_for_invalid_projection": used_raw_action_ids_for_invalid_projection,
-        },
-    }
 
 
 def sample_stage_trajectories_for_example(
@@ -308,9 +537,8 @@ def sample_stage_trajectories_for_example(
             reward_config=reward_config,
             invalid_terminal_reward=invalid_terminal_reward,
         )
-        if trajectory.sampled_selfies:
-            if trajectory.is_valid:
-                last_valid_trajectory = trajectory
+        if trajectory.sampled_selfies and trajectory.is_valid:
+            last_valid_trajectory = trajectory
             previous_sampled_selfies.append(trajectory.sampled_selfies)
 
         trajectory_appended = False

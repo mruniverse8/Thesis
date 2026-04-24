@@ -75,6 +75,51 @@ class FixedRandom:
         return float(self._values.pop(0))
 
 
+class PrefixLogitPolicyModel:
+    def __init__(
+        self,
+        logits_by_action_prefix: dict[tuple[int, ...], dict[int, float]],
+        *,
+        vocab_size: int = 16,
+        eos_token_id: int | None = 99,
+    ) -> None:
+        self.logits_by_action_prefix = logits_by_action_prefix
+        self.config = SimpleNamespace(eos_token_id=eos_token_id)
+        self.calls: list[tuple[int, ...]] = []
+        self.vocab_size = vocab_size
+
+    def __call__(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        decoder_input_ids: torch.Tensor,
+        return_dict: bool,
+    ) -> SimpleNamespace:
+        del input_ids, attention_mask, return_dict
+        action_prefix = tuple(int(token_id) for token_id in decoder_input_ids[0, 1:].tolist())
+        self.calls.append(action_prefix)
+        logits = torch.full((1, decoder_input_ids.size(1), self.vocab_size), -20.0)
+        for token_id, score in self.logits_by_action_prefix.get(action_prefix, {}).items():
+            logits[:, -1, int(token_id)] = float(score)
+        return SimpleNamespace(logits=logits)
+
+
+class PrefixLogitModel:
+    def __init__(
+        self,
+        logits_by_action_prefix: dict[tuple[int, ...], dict[int, float]],
+        *,
+        vocab_size: int = 16,
+        eos_token_id: int | None = 99,
+    ) -> None:
+        self.policy_model = PrefixLogitPolicyModel(
+            logits_by_action_prefix,
+            vocab_size=vocab_size,
+            eos_token_id=eos_token_id,
+        )
+
+
 def test_build_sampled_stage_trajectory_from_generation_keeps_stop_out_of_action_ids() -> None:
     trajectory = build_sampled_stage_trajectory_from_generation(
         example={
@@ -277,7 +322,9 @@ def test_sample_stage_trajectories_for_example_appends_invalid_stage_when_probab
 
     assert len(trajectories) == 1
     assert trajectories[0].is_valid is False
-    assert trajectories[0].terminal_reward == pytest.approx(1.0e-4)
+    assert trajectories[0].terminal_reward == pytest.approx(
+        1.0e-4 * CHEBI20_REWARD_CONFIG.penalty_invalid
+    )
 
 
 def test_sample_stage_trajectories_for_example_skips_invalid_stage_when_probability_rejects(
@@ -1042,6 +1089,347 @@ def test_sample_stage_enforces_bom_and_masks_language_tokens() -> None:
     assert stage_sample["metadata"]["projection_applied"] is True
     assert stage_sample["metadata"]["projection_failure_reason"] is None
     assert stage_sample["metadata"]["raw_action_token_ids"] == (1, 2)
+
+
+def test_sample_stage_beam_search_selects_best_completed_eom_beam() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "[O]",
+            4: "<eom>",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            "[O]": 3,
+            EOM_TOKEN: 4,
+        },
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=4,
+        content_token_ids=(2, 3),
+    )
+    model = PrefixLogitModel(
+        {
+            (): {1: 8.0},
+            (1,): {2: 8.0, 3: 7.0},
+            (1, 2): {4: 9.0},
+            (1, 3): {4: 1.0},
+        },
+        vocab_size=8,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="beam",
+            num_beams=2,
+            max_stage_new_tokens=4,
+        ),
+        stage_token_constraints=token_constraints,
+    )
+
+    assert stage_sample["stage_text"] == "<bom>[C]<eom>"
+    assert stage_sample["sampled_selfies"] == "[C]"
+    assert stage_sample["action_token_ids"] == (1, 2)
+    assert stage_sample["stop_token"] == EOM_TOKEN
+    assert stage_sample["termination_reason"] == "stop_token"
+    assert stage_sample["metadata"]["decoding_strategy"] == "beam"
+    assert stage_sample["metadata"]["num_beams"] == 2
+    assert stage_sample["metadata"]["beam_rank"] == 0
+    assert stage_sample["metadata"]["raw_action_token_ids"] == (1, 2)
+
+
+def test_sample_stage_beam_search_cuts_beam_at_eom() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+            4: "[O]",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+            "[O]": 4,
+        },
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=3,
+        content_token_ids=(2, 4),
+    )
+    model = PrefixLogitModel(
+        {
+            (): {1: 8.0},
+            (1,): {2: 8.0},
+            (1, 2): {3: 8.0},
+            (1, 2, 3): {4: 8.0},
+        },
+        vocab_size=8,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="beam",
+            num_beams=1,
+            max_stage_new_tokens=5,
+        ),
+        stage_token_constraints=token_constraints,
+    )
+
+    assert stage_sample["stage_text"] == "<bom>[C]<eom>"
+    assert stage_sample["action_token_ids"] == (1, 2)
+    assert stage_sample["termination_reason"] == "stop_token"
+    assert model.policy_model.calls == [(), (1,), (1, 2)]
+
+
+def test_sample_stage_beam_search_respects_stage_token_constraints() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+            4: "ordinary",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+            "ordinary": 4,
+        },
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=3,
+        content_token_ids=(2,),
+    )
+    model = PrefixLogitModel(
+        {
+            (): {4: 10.0, 1: 0.0},
+            (1,): {4: 10.0, 2: 0.0},
+            (1, 2): {4: 10.0, 3: 0.0},
+        },
+        vocab_size=8,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="beam",
+            num_beams=2,
+            max_stage_new_tokens=4,
+        ),
+        stage_token_constraints=token_constraints,
+    )
+
+    assert stage_sample["stage_text"] == "<bom>[C]<eom>"
+    assert stage_sample["sampled_selfies"] == "[C]"
+    assert stage_sample["action_token_ids"] == (1, 2)
+    assert stage_sample["termination_reason"] == "stop_token"
+    assert 4 not in stage_sample["metadata"]["raw_action_token_ids"]
+
+
+def test_sample_stage_beam_search_stops_at_eos_token() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+            5: "</s>",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+            "</s>": 5,
+        },
+    )
+    model = PrefixLogitModel(
+        {
+            (): {5: 10.0, 1: 0.0},
+        },
+        vocab_size=8,
+        eos_token_id=5,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="beam",
+            num_beams=1,
+            max_stage_new_tokens=4,
+        ),
+    )
+
+    assert stage_sample["sampled_selfies"] is None
+    assert stage_sample["action_token_ids"] == ()
+    assert stage_sample["stop_token"] == tokenizer.eos_token
+    assert stage_sample["termination_reason"] == "eos_token"
+    assert stage_sample["metadata"]["raw_action_token_ids"] == ()
+
+
+def test_sample_stage_beam_search_returns_unfinished_stage_at_max_stage_tokens() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+        },
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=3,
+        content_token_ids=(2,),
+    )
+    model = PrefixLogitModel(
+        {
+            (): {1: 8.0},
+            (1,): {2: 8.0},
+            (1, 2): {3: 8.0},
+        },
+        vocab_size=8,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="beam",
+            num_beams=1,
+            max_stage_new_tokens=2,
+        ),
+        stage_token_constraints=token_constraints,
+    )
+
+    assert stage_sample["sampled_selfies"] is None
+    assert stage_sample["action_token_ids"] == (1, 2)
+    assert stage_sample["stop_token"] is None
+    assert stage_sample["termination_reason"] == "max_stage_new_tokens"
+    assert stage_sample["metadata"]["used_raw_action_ids_for_invalid_projection"] is True
+
+
+def test_sample_stage_beam_search_returns_unfinished_stage_at_max_sequence_length() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+        },
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=3,
+        content_token_ids=(2,),
+    )
+    model = PrefixLogitModel(
+        {
+            (): {1: 8.0},
+            (1,): {2: 8.0},
+        },
+        vocab_size=8,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="beam",
+            num_beams=1,
+            max_stage_new_tokens=4,
+            max_sequence_length=4,
+        ),
+        stage_token_constraints=token_constraints,
+    )
+
+    assert stage_sample["sampled_selfies"] is None
+    assert stage_sample["action_token_ids"] == (1,)
+    assert stage_sample["stop_token"] is None
+    assert stage_sample["termination_reason"] == "max_sequence_length"
+    assert model.policy_model.calls == [()]
+
+
+def test_sample_stage_explicit_sample_strategy_preserves_sampling_path() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+        },
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=3,
+        content_token_ids=(2,),
+    )
+    model = PrefixLogitModel(
+        {
+            (): {1: 8.0},
+            (1,): {2: 8.0},
+            (1, 2): {3: 8.0},
+        },
+        vocab_size=8,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="sample",
+            num_beams=1,
+            max_stage_new_tokens=4,
+            top_p=1.0,
+        ),
+        stage_token_constraints=token_constraints,
+    )
+
+    assert stage_sample["stage_text"] == "<bom>[C]<eom>"
+    assert stage_sample["termination_reason"] == "stop_token"
+    assert "beam_score" not in stage_sample["metadata"]
 
 
 def test_sample_stage_projects_explicit_hydrogens_to_no_h_prefix_sequence() -> None:

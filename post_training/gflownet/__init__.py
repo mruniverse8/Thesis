@@ -21,6 +21,7 @@ from .losses import (
 from .model import GFlowNetModel
 from .rewarding import StageRewardSummary, build_reward_config, score_stage_terminal_reward
 from .rollout import (
+    beam_search_stage,
     build_sampled_stage_trajectory_from_generation,
     encode_decoder_prefix,
     sample_stage,
@@ -47,6 +48,7 @@ __all__ = [
     "build_prefix_states",
     "build_reward_config",
     "build_sampled_stage_trajectory_from_generation",
+    "beam_search_stage",
     "detailed_balance_loss",
     "detailed_balance_residuals",
     "encode_decoder_prefix",

@@ -45,6 +45,8 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.rollout.max_molecules_per_sequence == 4
     assert config.rollout.append_probability == 0.6
     assert config.rollout.invalid_append_probability == 0.25
+    assert config.rollout.decoding_strategy == "sample"
+    assert config.rollout.num_beams == 1
     assert config.replay.enabled is True
     assert config.replay.buffer_type == "uniform"
     assert config.replay.capacity == 128
@@ -102,6 +104,10 @@ def test_gflownet_rollout_defaults_enable_constrained_decoding_and_tighter_sampl
 
     assert config.rollout.temperature == 0.8
     assert config.rollout.top_p == 0.95
+    assert config.rollout.decoding_strategy == "sample"
+    assert config.rollout.num_beams == 1
+    assert config.rollout.length_penalty == 1.0
+    assert config.rollout.early_stopping is True
     assert config.rollout.constrained_decoding is True
     assert config.rollout.append_probability == 0.30
     assert config.rollout.invalid_append_probability == 0.0
@@ -116,6 +122,24 @@ def test_gflownet_config_normalizes_invalid_stage_termination_to_true() -> None:
     config = GFlowNetConfig.from_dict({"rollout": {"terminate_on_invalid_stage": False}})
 
     assert config.rollout.terminate_on_invalid_stage is True
+
+
+def test_gflownet_config_from_dict_supports_beam_rollout_options() -> None:
+    config = GFlowNetConfig.from_dict(
+        {
+            "rollout": {
+                "decoding_strategy": "beam",
+                "num_beams": 4,
+                "length_penalty": 0.7,
+                "early_stopping": False,
+            }
+        }
+    )
+
+    assert config.rollout.decoding_strategy == "beam"
+    assert config.rollout.num_beams == 4
+    assert config.rollout.length_penalty == 0.7
+    assert config.rollout.early_stopping is False
 
 
 def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
