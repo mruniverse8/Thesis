@@ -71,5 +71,6 @@ gflownet:
     top_p: 0.25
     constrained_decoding: true
     append_probability: 0.30
+    invalid_append_probability: 0.0
     selfies_dict_path: molecules/dict/selfies_dict.txt
     terminate_on_invalid_stage: true

@@ -308,15 +308,21 @@ def sample_stage_trajectories_for_example(
             reward_config=reward_config,
             invalid_terminal_reward=invalid_terminal_reward,
         )
-        if trajectory.is_valid and trajectory.sampled_selfies:
-            last_valid_trajectory = trajectory
+        if trajectory.sampled_selfies:
+            if trajectory.is_valid:
+                last_valid_trajectory = trajectory
             previous_sampled_selfies.append(trajectory.sampled_selfies)
 
         trajectory_appended = False
-        if trajectory.is_valid and not return_last_valid_trajectory_only:
-            should_append = stage_index == 1 or (
-                float(generator.random()) < generation_config.append_probability
-            )
+        if not return_last_valid_trajectory_only:
+            if trajectory.is_valid:
+                should_append = stage_index == 1 or (
+                    float(generator.random()) < generation_config.append_probability
+                )
+            else:
+                should_append = (
+                    float(generator.random()) < generation_config.invalid_append_probability
+                )
             if should_append:
                 trajectories.append(trajectory)
                 trajectory_appended = True

@@ -17,6 +17,7 @@ class GFlowNetRolloutConfig:
     constrained_decoding: bool = True
     terminate_on_invalid_stage: bool = False
     append_probability: float = 0.30
+    invalid_append_probability: float = 0.0
     stage_separator: str = STAGE_SEPARATOR
     selfies_dict_path: str = "molecules/dict/selfies_dict.txt"
 
@@ -214,6 +215,18 @@ class GFlowNetConfig:
                             rollout_payload.get(
                                 "append_probability",
                                 GFlowNetRolloutConfig.append_probability,
+                            )
+                        ),
+                        1.0,
+                    ),
+                ),
+                invalid_append_probability=max(
+                    0.0,
+                    min(
+                        float(
+                            rollout_payload.get(
+                                "invalid_append_probability",
+                                GFlowNetRolloutConfig.invalid_append_probability,
                             )
                         ),
                         1.0,

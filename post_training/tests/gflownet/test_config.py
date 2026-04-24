@@ -20,6 +20,7 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
                 "max_stage_new_tokens": 96,
                 "max_molecules_per_sequence": 4,
                 "append_probability": 0.6,
+                "invalid_append_probability": 0.25,
             },
             "replay": {
                 "enabled": True,
@@ -43,6 +44,7 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.rollout.max_stage_new_tokens == 96
     assert config.rollout.max_molecules_per_sequence == 4
     assert config.rollout.append_probability == 0.6
+    assert config.rollout.invalid_append_probability == 0.25
     assert config.replay.enabled is True
     assert config.replay.buffer_type == "uniform"
     assert config.replay.capacity == 128
@@ -102,6 +104,7 @@ def test_gflownet_rollout_defaults_enable_constrained_decoding_and_tighter_sampl
     assert config.rollout.top_p == 0.95
     assert config.rollout.constrained_decoding is True
     assert config.rollout.append_probability == 0.30
+    assert config.rollout.invalid_append_probability == 0.0
     assert config.rollout.terminate_on_invalid_stage is True
     assert config.rollout.selfies_dict_path == "molecules/dict/selfies_dict.txt"
     assert config.replay.enabled is True

@@ -224,6 +224,116 @@ def test_sample_stage_trajectories_for_example_ignores_invalid_stage_when_config
     assert trajectories == []
 
 
+def test_sample_stage_trajectories_for_example_appends_invalid_stage_when_probability_allows(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<eom>",
+        },
+        {EOM_TOKEN: 1},
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    monkeypatch.setattr(
+        "post_training.gflownet.rollout.sample_stage",
+        lambda *args, **kwargs: {
+            "stage_text": "<eom>",
+            "sampled_selfies": None,
+            "action_token_ids": (),
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+        },
+    )
+
+    trajectories = sample_stage_trajectories_for_example(
+        DummyModel(),
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=GFlowNetRolloutConfig(
+            max_molecules_per_sequence=1,
+            append_probability=0.0,
+            invalid_append_probability=0.25,
+            terminate_on_invalid_stage=True,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandom([0.1]),
+    )
+
+    assert len(trajectories) == 1
+    assert trajectories[0].is_valid is False
+    assert trajectories[0].terminal_reward == pytest.approx(1.0e-4)
+
+
+def test_sample_stage_trajectories_for_example_skips_invalid_stage_when_probability_rejects(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<eom>",
+        },
+        {EOM_TOKEN: 1},
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    monkeypatch.setattr(
+        "post_training.gflownet.rollout.sample_stage",
+        lambda *args, **kwargs: {
+            "stage_text": "<eom>",
+            "sampled_selfies": None,
+            "action_token_ids": (),
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+        },
+    )
+
+    trajectories = sample_stage_trajectories_for_example(
+        DummyModel(),
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=GFlowNetRolloutConfig(
+            max_molecules_per_sequence=1,
+            append_probability=1.0,
+            invalid_append_probability=0.25,
+            terminate_on_invalid_stage=True,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandom([0.9]),
+    )
+
+    assert trajectories == []
+
+
 def test_sample_stage_trajectories_for_example_keeps_invalid_sample_out_of_prefix_history(
     monkeypatch,
 ) -> None:
