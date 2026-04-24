@@ -26,7 +26,7 @@ def test_score_stage_terminal_reward_uses_current_stage_reward_for_valid_stage()
     assert summary.prefix_rewards == pytest.approx((1.0e-4, 1.0e-4, summary.terminal_reward))
 
 
-def test_score_stage_terminal_reward_floors_invalid_stage() -> None:
+def test_score_stage_terminal_reward_penalizes_invalid_stage_floor() -> None:
     summary = score_stage_terminal_reward(
         None,
         targets=["[C][C][O]"],
@@ -37,8 +37,23 @@ def test_score_stage_terminal_reward_floors_invalid_stage() -> None:
     )
 
     assert summary.is_valid_terminal is False
-    assert summary.terminal_reward == pytest.approx(5.0e-4)
-    assert summary.prefix_rewards == pytest.approx((5.0e-4, 5.0e-4))
+    assert summary.terminal_reward == pytest.approx(2.5e-4)
+    assert summary.prefix_rewards == pytest.approx((5.0e-4, 2.5e-4))
+
+
+def test_score_stage_terminal_reward_uses_configured_invalid_penalty() -> None:
+    summary = score_stage_terminal_reward(
+        None,
+        targets=["[C][C][O]"],
+        previous_candidates=[],
+        num_prefix_states=2,
+        reward_config=RewardConfig(penalty_invalid=0.25),
+        invalid_terminal_reward=1.0e-4,
+    )
+
+    assert summary.is_valid_terminal is False
+    assert summary.terminal_reward == pytest.approx(2.5e-5)
+    assert summary.prefix_rewards == pytest.approx((1.0e-4, 2.5e-5))
 
 
 def test_score_stage_terminal_reward_applies_reward_var2_duplicate_penalty_when_configured() -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from molecules.defaults import (
     CHEBI20_REWARD_CONFIG,
+    DEFAULT_PENALTY_INVALID,
     DEFAULT_REWARD_CONFIG,
     PPO_DEFAULTS,
     RewardConfig,
@@ -19,6 +20,7 @@ from molecules.similarity import compute_dice_similarity, compute_tanimoto_simil
 
 __all__ = [
     "CHEBI20_REWARD_CONFIG",
+    "DEFAULT_PENALTY_INVALID",
     "DEFAULT_REWARD_CONFIG",
     "PPO_DEFAULTS",
     "MoleculeRecord",

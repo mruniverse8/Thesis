@@ -37,6 +37,7 @@ reward:
   match_weight: 1.0
   diversity_weight: 1.0
   reward_amplification: 8.0
+  penalty_invalid: 0.5
   acceptance_dice_threshold: 0.7
   acceptance_tanimoto_threshold: 0.6
 

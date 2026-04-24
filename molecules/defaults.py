@@ -17,6 +17,7 @@ DEFAULT_MATCH_WEIGHT = 1.0
 DEFAULT_DIVERSITY_WEIGHT = 1.0
 DEFAULT_REWARD_AMPLIFICATION = 8.0
 DEFAULT_DUPLICATE_PENALTY_FACTOR = 1.0
+DEFAULT_PENALTY_INVALID = 0.5
 
 DEFAULT_ACCEPTANCE_DICE_THRESHOLD = 0.7
 DEFAULT_ACCEPTANCE_TANIMOTO_THRESHOLD = 0.6
@@ -34,6 +35,7 @@ class RewardConfig:
     diversity_weight: float = DEFAULT_DIVERSITY_WEIGHT
     reward_amplification: float = DEFAULT_REWARD_AMPLIFICATION
     duplicate_penalty_factor: float = DEFAULT_DUPLICATE_PENALTY_FACTOR
+    penalty_invalid: float = DEFAULT_PENALTY_INVALID
     acceptance_dice_threshold: float = DEFAULT_ACCEPTANCE_DICE_THRESHOLD
     acceptance_tanimoto_threshold: float = DEFAULT_ACCEPTANCE_TANIMOTO_THRESHOLD
 
@@ -44,6 +46,8 @@ class RewardConfig:
             )
         if not 0.0 <= float(self.duplicate_penalty_factor) <= 1.0:
             raise ValueError("duplicate_penalty_factor must be within [0.0, 1.0].")
+        if not 0.0 < float(self.penalty_invalid) <= 1.0:
+            raise ValueError("penalty_invalid must be within (0.0, 1.0].")
 
 
 DEFAULT_REWARD_CONFIG = RewardConfig()
@@ -74,6 +78,7 @@ __all__ = [
     "DEFAULT_FINGERPRINT_RADIUS",
     "DEFAULT_MATCH_ALPHA",
     "DEFAULT_MATCH_WEIGHT",
+    "DEFAULT_PENALTY_INVALID",
     "DEFAULT_PLUS_VALID",
     "DEFAULT_REWARD_AMPLIFICATION",
     "DEFAULT_REWARD_CONFIG",

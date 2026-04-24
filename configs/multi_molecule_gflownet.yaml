@@ -38,6 +38,7 @@ reward:
   diversity_weight: 1.0
   reward_amplification: 8.0
   duplicate_penalty_factor: 0.1
+  penalty_invalid: 0.5
   acceptance_dice_threshold: 0.7
   acceptance_tanimoto_threshold: 0.6
 

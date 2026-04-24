@@ -42,17 +42,19 @@ def score_stage_terminal_reward(
     if num_prefix_states <= 0:
         raise ValueError("num_prefix_states must be positive.")
 
+    effective_reward_config = reward_config or RewardConfig()
+    penalty_invalid = float(effective_reward_config.penalty_invalid)
     reward_floor = max(float(invalid_terminal_reward), 1.0e-12)
     breakdown = score_stage_reward(
         (candidate_selfies or "").strip(),
         targets=targets,
         previous_candidates=previous_candidates,
-        config=reward_config,
+        config=effective_reward_config,
     )
     is_valid_terminal = bool(breakdown.candidate.is_valid)
     terminal_reward = max(float(breakdown.amplified_reward), reward_floor)
     if not is_valid_terminal:
-        terminal_reward = reward_floor
+        terminal_reward *= penalty_invalid
 
     prefix_rewards = tuple([reward_floor] * (num_prefix_states - 1) + [terminal_reward])
     return StageRewardSummary(
