@@ -14,6 +14,13 @@ def test_build_reward_config_uses_chebi_default_when_not_overridden() -> None:
     assert config.diversity_beta == CHEBI20_DIVERSITY_BETA
     assert config.reward_variant == "reward_var2"
     assert config.plus_valid == pytest.approx(0.8)
+    assert config.invalid_similarity_ngram_size == 3
+
+
+def test_build_reward_config_accepts_invalid_similarity_ngram_size() -> None:
+    config = build_reward_config({"invalid_similarity_ngram_size": 2})
+
+    assert config.invalid_similarity_ngram_size == 2
 
 
 def test_score_stage_candidate_handles_first_stage() -> None:

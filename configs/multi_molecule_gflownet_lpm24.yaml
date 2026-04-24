@@ -39,6 +39,7 @@ reward:
   reward_amplification: 8.0
   duplicate_penalty_factor: 0.1
   penalty_invalid: 0.5
+  invalid_similarity_ngram_size: 3
   acceptance_dice_threshold: 0.7
   acceptance_tanimoto_threshold: 0.6
 
@@ -55,14 +56,19 @@ gflownet:
   invalid_terminal_reward: 1.0e-4
   replay:
     enabled: true
-    buffer_type: priority
+    buffer_type: experimental_mixture
     capacity: 256
     replay_fraction: 0.25
-    max_total_action_tokens: 50000
     with_replacement: false
-    top_reward_fraction: 0.50
-    hard_positive_fraction: 0.25
-    hard_negative_fraction: 0.25
+    recent_fraction: 0.40
+    reward_fraction: 0.40
+    uniform_fraction: 0.20
+    tb_residual_fraction: 0.20
+    reward_temperature: 1.0
+    tb_residual_temperature: 1.0
+    recent_window_size: 64
+    max_invalid_fraction: 0.20
+    max_duplicate_fraction: 0.10
   rollout:
     max_source_length: 512
     max_stage_new_tokens: 192

@@ -129,10 +129,15 @@ class MultiMoleculeGFlowNetTrainer:
                 capacity=self.config.replay.capacity,
                 max_total_action_tokens=self.config.replay.max_total_action_tokens,
                 buffer_type=self.config.replay.buffer_type,
-                invalid_terminal_reward=self.config.invalid_terminal_reward,
-                top_reward_fraction=self.config.replay.top_reward_fraction,
-                hard_positive_fraction=self.config.replay.hard_positive_fraction,
-                hard_negative_fraction=self.config.replay.hard_negative_fraction,
+                recent_fraction=self.config.replay.recent_fraction,
+                reward_fraction=self.config.replay.reward_fraction,
+                uniform_fraction=self.config.replay.uniform_fraction,
+                tb_residual_fraction=self.config.replay.tb_residual_fraction,
+                reward_temperature=self.config.replay.reward_temperature,
+                tb_residual_temperature=self.config.replay.tb_residual_temperature,
+                recent_window_size=self.config.replay.recent_window_size,
+                max_invalid_fraction=self.config.replay.max_invalid_fraction,
+                max_duplicate_fraction=self.config.replay.max_duplicate_fraction,
             )
             if self.config.replay.enabled and self.config.replay.capacity > 0
             else None
@@ -307,9 +312,10 @@ class MultiMoleculeGFlowNetTrainer:
                     if self.replay_buffer is not None
                     else "disabled"
                 ),
-                "replay_top_reward_count": 0.0,
-                "replay_hard_positive_count": 0.0,
-                "replay_hard_negative_count": 0.0,
+                "replay_recent_count": 0.0,
+                "replay_reward_count": 0.0,
+                "replay_uniform_count": 0.0,
+                "replay_tb_residual_count": 0.0,
                 "replay_size": float(len(self.replay_buffer) if self.replay_buffer is not None else 0),
                 "replay_total_action_tokens": float(
                     self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0
@@ -373,6 +379,8 @@ class MultiMoleculeGFlowNetTrainer:
         scoring_start = perf_counter()
         scored_trajectories = self.score_trajectories(optimization_trajectories)
         scoring_duration_sec = perf_counter() - scoring_start
+        if self.replay_buffer is not None:
+            self.replay_buffer.observe_scored(scored_trajectories)
 
         loss_start = perf_counter()
         loss, diagnostics = self._compute_objective_loss(scored_trajectories)
@@ -462,9 +470,12 @@ class MultiMoleculeGFlowNetTrainer:
                 if self.replay_buffer is not None
                 else "disabled"
             ),
-            "replay_top_reward_count": float(replay_sample.top_reward_count),
-            "replay_hard_positive_count": float(replay_sample.hard_positive_count),
-            "replay_hard_negative_count": float(replay_sample.hard_negative_count),
+            "replay_recent_count": float(replay_sample.source_counts.get("recent", 0)),
+            "replay_reward_count": float(replay_sample.source_counts.get("reward", 0)),
+            "replay_uniform_count": float(replay_sample.source_counts.get("uniform", 0)),
+            "replay_tb_residual_count": float(
+                replay_sample.source_counts.get("tb_residual", 0)
+            ),
             "replay_size": float(len(self.replay_buffer) if self.replay_buffer is not None else 0),
             "replay_total_action_tokens": float(
                 self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0

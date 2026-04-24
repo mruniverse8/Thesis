@@ -194,10 +194,11 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     assert metrics["num_replay_trajectories"] == 1.0
     assert metrics["configured_replay_fraction"] == pytest.approx(0.2)
     assert metrics["replay_fraction"] == pytest.approx(0.2)
-    assert metrics["replay_buffer_type"] == "priority"
-    assert metrics["replay_top_reward_count"] == pytest.approx(1.0)
-    assert metrics["replay_hard_positive_count"] == pytest.approx(0.0)
-    assert metrics["replay_hard_negative_count"] == pytest.approx(0.0)
+    assert metrics["replay_buffer_type"] == "experimental_mixture"
+    assert metrics["replay_recent_count"] == pytest.approx(0.0)
+    assert metrics["replay_reward_count"] == pytest.approx(0.0)
+    assert metrics["replay_uniform_count"] == pytest.approx(1.0)
+    assert metrics["replay_tb_residual_count"] == pytest.approx(0.0)
     assert metrics["replay_size"] == 5.0
     assert metrics["replay_total_action_tokens"] == 12.0
     assert metrics["rollout_append_probability"] == pytest.approx(0.30)

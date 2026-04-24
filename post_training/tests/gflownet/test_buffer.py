@@ -4,11 +4,15 @@ from src.constants import EOM_TOKEN
 
 from post_training.gflownet.buffer import (
     OnPolicyBatch,
-    PriorityReplayBuffer,
     TrajectoryReplayBuffer,
     UniformReplayBuffer,
 )
+from post_training.gflownet.experimental_buffers import (
+    ExperimentalMixtureReplayBuffer,
+    ExperimentalTBMixtureReplayBuffer,
+)
 from post_training.gflownet.trajectory import SampledStageTrajectory
+from post_training.gflownet.trajectory import ScoredStageTrajectory
 
 
 def _make_sampled(
@@ -80,106 +84,185 @@ def test_trajectory_replay_buffer_alias_points_to_uniform_buffer() -> None:
     assert isinstance(buffer, UniformReplayBuffer)
 
 
-def test_priority_replay_buffer_classifies_trajectories_into_expected_buckets() -> None:
-    buffer = PriorityReplayBuffer(
-        capacity=8,
-        max_total_action_tokens=64,
-        invalid_terminal_reward=1.0e-4,
-        top_reward_fraction=0.5,
-        hard_positive_fraction=0.25,
-        hard_negative_fraction=0.25,
+def test_experimental_mixture_replay_buffer_respects_element_capacity() -> None:
+    buffer = ExperimentalMixtureReplayBuffer(capacity=2)
+    buffer.extend(
+        [
+            _make_sampled("one", stage_index=1, num_actions=2, terminal_reward=1.0),
+            _make_sampled("two", stage_index=1, num_actions=3, terminal_reward=2.0),
+            _make_sampled("three", stage_index=1, num_actions=4, terminal_reward=3.0),
+        ]
     )
-    trajectories = [
-        _make_sampled("top-a", stage_index=1, num_actions=2, terminal_reward=5.0),
-        _make_sampled("top-b", stage_index=1, num_actions=2, terminal_reward=4.0),
-        _make_sampled("hard-pos", stage_index=1, num_actions=2, terminal_reward=2.0),
-        _make_sampled(
-            "hard-neg-invalid",
-            stage_index=1,
-            num_actions=2,
-            terminal_reward=1.0e-4,
-            is_valid=False,
-        ),
-        _make_sampled(
-            "hard-neg-dup",
-            stage_index=1,
-            num_actions=2,
-            terminal_reward=3.0,
-            is_duplicate=True,
-        ),
-    ]
-    buffer.extend(trajectories)
 
-    sample = buffer.sample(5, rng=random.Random(0), with_replacement=False)
-
-    assert len(sample) == 5
-    assert sample.top_reward_count == 2
-    assert sample.hard_positive_count == 1
-    assert sample.hard_negative_count == 2
+    assert len(buffer) == 2
+    assert buffer.total_action_tokens == 7
+    assert [item.rollout_id for item in buffer.snapshot()] == ["two", "three"]
 
 
-def test_priority_replay_buffer_respects_bucket_mix_when_buckets_are_populated() -> None:
-    buffer = PriorityReplayBuffer(
-        capacity=8,
-        max_total_action_tokens=64,
-        invalid_terminal_reward=1.0e-4,
-        top_reward_fraction=0.5,
-        hard_positive_fraction=0.25,
-        hard_negative_fraction=0.25,
+def test_experimental_mixture_replay_buffer_samples_recent_source() -> None:
+    buffer = ExperimentalMixtureReplayBuffer(
+        capacity=4,
+        recent_fraction=1.0,
+        reward_fraction=0.0,
+        uniform_fraction=0.0,
+        recent_window_size=1,
     )
     buffer.extend(
         [
-            _make_sampled("top-a", stage_index=1, num_actions=2, terminal_reward=5.0),
-            _make_sampled("top-b", stage_index=1, num_actions=2, terminal_reward=4.5),
-            _make_sampled("top-c", stage_index=1, num_actions=2, terminal_reward=4.0),
-            _make_sampled("hard-pos-a", stage_index=1, num_actions=2, terminal_reward=2.0),
-            _make_sampled("hard-pos-b", stage_index=1, num_actions=2, terminal_reward=1.5),
+            _make_sampled("old", stage_index=1, num_actions=2),
+            _make_sampled("recent", stage_index=1, num_actions=2),
+        ]
+    )
+
+    sample = buffer.sample(5, rng=random.Random(0), with_replacement=True)
+
+    assert [item.rollout_id for item in sample.trajectories] == ["recent"] * 5
+    assert sample.source_counts == {"recent": 5}
+
+
+def test_experimental_mixture_replay_buffer_samples_reward_source() -> None:
+    buffer = ExperimentalMixtureReplayBuffer(
+        capacity=4,
+        recent_fraction=0.0,
+        reward_fraction=1.0,
+        uniform_fraction=0.0,
+    )
+    buffer.extend(
+        [
+            _make_sampled("low", stage_index=1, num_actions=2, terminal_reward=1.0e-6),
+            _make_sampled("high", stage_index=1, num_actions=2, terminal_reward=1000.0),
+        ]
+    )
+
+    sample = buffer.sample(8, rng=random.Random(0), with_replacement=True)
+
+    assert {item.rollout_id for item in sample.trajectories} == {"high"}
+    assert sample.source_counts == {"reward": 8}
+
+
+def test_experimental_mixture_replay_buffer_samples_uniform_without_replacement() -> None:
+    buffer = ExperimentalMixtureReplayBuffer(
+        capacity=4,
+        recent_fraction=0.0,
+        reward_fraction=0.0,
+        uniform_fraction=1.0,
+    )
+    buffer.extend(
+        [
+            _make_sampled("one", stage_index=1, num_actions=2),
+            _make_sampled("two", stage_index=1, num_actions=2),
+            _make_sampled("three", stage_index=1, num_actions=2),
+        ]
+    )
+
+    sample = buffer.sample(2, rng=random.Random(0), with_replacement=False)
+
+    assert len(sample) == 2
+    assert len({item.rollout_id for item in sample.trajectories}) == 2
+    assert sample.source_counts == {"uniform": 2}
+
+
+def test_experimental_tb_mixture_replay_buffer_updates_residual_source() -> None:
+    buffer = ExperimentalTBMixtureReplayBuffer(
+        capacity=4,
+        recent_fraction=0.0,
+        reward_fraction=0.0,
+        uniform_fraction=0.0,
+        tb_residual_fraction=1.0,
+    )
+    low = _make_sampled("low", stage_index=1, num_actions=1, terminal_reward=1.0)
+    high = _make_sampled("high", stage_index=1, num_actions=1, terminal_reward=1.0)
+    buffer.extend([low, high])
+    buffer.observe_scored(
+        [
+            ScoredStageTrajectory(
+                sampled=low,
+                log_pf_tokens=(0.0,),
+                log_stop=(0.0, 0.0),
+                log_state_flows=(0.0, 0.0),
+            ),
+            ScoredStageTrajectory(
+                sampled=high,
+                log_pf_tokens=(1000.0,),
+                log_stop=(0.0, 0.0),
+                log_state_flows=(0.0, 0.0),
+            ),
+        ]
+    )
+
+    sample = buffer.sample(8, rng=random.Random(0), with_replacement=True)
+
+    assert {item.rollout_id for item in sample.trajectories} == {"high"}
+    assert sample.source_counts == {"tb_residual": 8}
+
+
+def test_experimental_mixture_replay_buffer_evicts_invalid_over_quota_first() -> None:
+    buffer = ExperimentalMixtureReplayBuffer(
+        capacity=3,
+        max_invalid_fraction=0.25,
+        max_duplicate_fraction=1.0,
+    )
+    buffer.extend(
+        [
+            _make_sampled("valid-a", stage_index=1, num_actions=2, terminal_reward=3.0),
             _make_sampled(
-                "hard-neg-a",
+                "invalid-a",
                 stage_index=1,
                 num_actions=2,
                 terminal_reward=1.0e-4,
                 is_valid=False,
             ),
             _make_sampled(
-                "hard-neg-b",
+                "invalid-b",
                 stage_index=1,
                 num_actions=2,
-                terminal_reward=2.5,
-                is_duplicate=True,
+                terminal_reward=1.0e-4,
+                is_valid=False,
             ),
+            _make_sampled("valid-b", stage_index=1, num_actions=2, terminal_reward=2.0),
         ]
     )
 
-    sample = buffer.sample(4, rng=random.Random(0), with_replacement=False)
+    assert len(buffer) == 3
+    assert [item.rollout_id for item in buffer.snapshot()].count("invalid-a") == 0
+    assert {item.rollout_id for item in buffer.snapshot()} == {
+        "valid-a",
+        "invalid-b",
+        "valid-b",
+    }
 
-    assert len(sample) == 4
-    assert sample.top_reward_count == 2
-    assert sample.hard_positive_count == 1
-    assert sample.hard_negative_count == 1
 
-
-def test_priority_replay_buffer_backfills_from_remaining_buckets_when_a_bucket_is_sparse() -> None:
-    buffer = PriorityReplayBuffer(
-        capacity=8,
-        max_total_action_tokens=64,
-        invalid_terminal_reward=1.0e-4,
-        top_reward_fraction=0.5,
-        hard_positive_fraction=0.25,
-        hard_negative_fraction=0.25,
+def test_experimental_mixture_replay_buffer_evicts_duplicates_over_quota_first() -> None:
+    buffer = ExperimentalMixtureReplayBuffer(
+        capacity=3,
+        max_invalid_fraction=1.0,
+        max_duplicate_fraction=0.25,
     )
     buffer.extend(
         [
-            _make_sampled("top-a", stage_index=1, num_actions=2, terminal_reward=5.0),
-            _make_sampled("top-b", stage_index=1, num_actions=2, terminal_reward=4.0),
-            _make_sampled("hard-pos-a", stage_index=1, num_actions=2, terminal_reward=2.0),
-            _make_sampled("hard-pos-b", stage_index=1, num_actions=2, terminal_reward=1.5),
+            _make_sampled("valid-a", stage_index=1, num_actions=2, terminal_reward=3.0),
+            _make_sampled(
+                "duplicate-a",
+                stage_index=1,
+                num_actions=2,
+                terminal_reward=1.0,
+                is_duplicate=True,
+            ),
+            _make_sampled(
+                "duplicate-b",
+                stage_index=1,
+                num_actions=2,
+                terminal_reward=1.0,
+                is_duplicate=True,
+            ),
+            _make_sampled("valid-b", stage_index=1, num_actions=2, terminal_reward=2.0),
         ]
     )
 
-    sample = buffer.sample(4, rng=random.Random(0), with_replacement=False)
-
-    assert len(sample) == 4
-    assert sample.top_reward_count == 2
-    assert sample.hard_positive_count == 2
-    assert sample.hard_negative_count == 0
+    assert len(buffer) == 3
+    assert [item.rollout_id for item in buffer.snapshot()].count("duplicate-a") == 0
+    assert {item.rollout_id for item in buffer.snapshot()} == {
+        "valid-a",
+        "duplicate-b",
+        "valid-b",
+    }

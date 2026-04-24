@@ -29,15 +29,21 @@ class GFlowNetRolloutConfig:
 @dataclass(frozen=True)
 class ReplayConfig:
     enabled: bool = True
-    buffer_type: str = "priority"
+    buffer_type: str = "experimental_mixture"
     capacity: int = 256
     replay_fraction: float | None = 0.25
     replay_batch_size: int = 0
     max_total_action_tokens: int = 50_000
     with_replacement: bool = False
-    top_reward_fraction: float = 0.50
-    hard_positive_fraction: float = 0.25
-    hard_negative_fraction: float = 0.25
+    recent_fraction: float = 0.40
+    reward_fraction: float = 0.40
+    uniform_fraction: float = 0.20
+    tb_residual_fraction: float = 0.20
+    reward_temperature: float = 1.0
+    tb_residual_temperature: float = 1.0
+    recent_window_size: int = 64
+    max_invalid_fraction: float = 0.20
+    max_duplicate_fraction: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -308,31 +314,91 @@ class GFlowNetConfig:
                         ReplayConfig.with_replacement,
                     )
                 ),
-                top_reward_fraction=max(
+                recent_fraction=max(
                     0.0,
                     float(
                         replay_payload.get(
-                            "top_reward_fraction",
-                            ReplayConfig.top_reward_fraction,
+                            "recent_fraction",
+                            ReplayConfig.recent_fraction,
                         )
                     ),
                 ),
-                hard_positive_fraction=max(
+                reward_fraction=max(
                     0.0,
                     float(
                         replay_payload.get(
-                            "hard_positive_fraction",
-                            ReplayConfig.hard_positive_fraction,
+                            "reward_fraction",
+                            ReplayConfig.reward_fraction,
                         )
                     ),
                 ),
-                hard_negative_fraction=max(
+                uniform_fraction=max(
                     0.0,
                     float(
                         replay_payload.get(
-                            "hard_negative_fraction",
-                            ReplayConfig.hard_negative_fraction,
+                            "uniform_fraction",
+                            ReplayConfig.uniform_fraction,
                         )
+                    ),
+                ),
+                tb_residual_fraction=max(
+                    0.0,
+                    float(
+                        replay_payload.get(
+                            "tb_residual_fraction",
+                            ReplayConfig.tb_residual_fraction,
+                        )
+                    ),
+                ),
+                reward_temperature=max(
+                    1.0e-6,
+                    float(
+                        replay_payload.get(
+                            "reward_temperature",
+                            ReplayConfig.reward_temperature,
+                        )
+                    ),
+                ),
+                tb_residual_temperature=max(
+                    1.0e-6,
+                    float(
+                        replay_payload.get(
+                            "tb_residual_temperature",
+                            ReplayConfig.tb_residual_temperature,
+                        )
+                    ),
+                ),
+                recent_window_size=max(
+                    1,
+                    int(
+                        replay_payload.get(
+                            "recent_window_size",
+                            ReplayConfig.recent_window_size,
+                        )
+                    ),
+                ),
+                max_invalid_fraction=max(
+                    0.0,
+                    min(
+                        float(
+                            replay_payload.get(
+                                "max_invalid_fraction",
+                                ReplayConfig.max_invalid_fraction,
+                            )
+                        ),
+                        1.0,
+                    ),
+                ),
+                max_duplicate_fraction=max(
+                    0.0,
+                    min(
+                        float(
+                            replay_payload.get(
+                                "max_duplicate_fraction",
+                                ReplayConfig.max_duplicate_fraction,
+                            )
+                        ),
+                        1.0,
                     ),
                 ),
             ),

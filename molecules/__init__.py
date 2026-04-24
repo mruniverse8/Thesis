@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .defaults import (
     CHEBI20_REWARD_CONFIG,
+    DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE,
     DEFAULT_REWARD_CONFIG,
     PPO_DEFAULTS,
     RewardConfig,
@@ -9,6 +10,7 @@ from .defaults import (
 
 __all__ = [
     "CHEBI20_REWARD_CONFIG",
+    "DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE",
     "DEFAULT_REWARD_CONFIG",
     "PPO_DEFAULTS",
     "MoleculeRecord",

@@ -29,9 +29,15 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
                 "replay_fraction": 0.2,
                 "max_total_action_tokens": 4096,
                 "with_replacement": True,
-                "top_reward_fraction": 0.4,
-                "hard_positive_fraction": 0.3,
-                "hard_negative_fraction": 0.3,
+                "recent_fraction": 0.3,
+                "reward_fraction": 0.4,
+                "uniform_fraction": 0.2,
+                "tb_residual_fraction": 0.1,
+                "reward_temperature": 0.8,
+                "tb_residual_temperature": 1.2,
+                "recent_window_size": 16,
+                "max_invalid_fraction": 0.35,
+                "max_duplicate_fraction": 0.15,
             },
         }
     )
@@ -53,9 +59,15 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.replay.replay_fraction == 0.2
     assert config.replay.max_total_action_tokens == 4096
     assert config.replay.with_replacement is True
-    assert config.replay.top_reward_fraction == 0.4
-    assert config.replay.hard_positive_fraction == 0.3
-    assert config.replay.hard_negative_fraction == 0.3
+    assert config.replay.recent_fraction == 0.3
+    assert config.replay.reward_fraction == 0.4
+    assert config.replay.uniform_fraction == 0.2
+    assert config.replay.tb_residual_fraction == 0.1
+    assert config.replay.reward_temperature == 0.8
+    assert config.replay.tb_residual_temperature == 1.2
+    assert config.replay.recent_window_size == 16
+    assert config.replay.max_invalid_fraction == 0.35
+    assert config.replay.max_duplicate_fraction == 0.15
 
 
 def test_gflownet_config_from_dict_keeps_legacy_replay_batch_size_when_fraction_is_absent() -> None:
@@ -114,7 +126,7 @@ def test_gflownet_rollout_defaults_enable_constrained_decoding_and_tighter_sampl
     assert config.rollout.terminate_on_invalid_stage is True
     assert config.rollout.selfies_dict_path == "molecules/dict/selfies_dict.txt"
     assert config.replay.enabled is True
-    assert config.replay.buffer_type == "priority"
+    assert config.replay.buffer_type == "experimental_mixture"
     assert config.replay.replay_fraction == 0.25
 
 
@@ -158,6 +170,7 @@ def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
     assert config.rollout.max_source_length == 384
     assert config.replay.capacity == 256
     assert config.replay.max_total_action_tokens == 50_000
+    assert config.replay.buffer_type == "experimental_mixture"
 
 
 def test_multi_molecule_gflownet_mini_config_parses_for_tb_db_and_subtb() -> None:

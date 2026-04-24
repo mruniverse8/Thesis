@@ -2,7 +2,6 @@
 
 from .buffer import (
     OnPolicyBatch,
-    PriorityReplayBuffer,
     ReplayBuffer,
     ReplaySampleBatch,
     TrajectoryReplayBuffer,
@@ -10,6 +9,7 @@ from .buffer import (
     build_replay_buffer,
 )
 from .config import GFlowNetConfig, GFlowNetRolloutConfig, ReplayConfig, build_gflownet_config
+from .experimental_buffers import ExperimentalMixtureReplayBuffer, ExperimentalTBMixtureReplayBuffer
 from .losses import (
     detailed_balance_loss,
     detailed_balance_residuals,
@@ -34,7 +34,8 @@ __all__ = [
     "GFlowNetModel",
     "GFlowNetRolloutConfig",
     "OnPolicyBatch",
-    "PriorityReplayBuffer",
+    "ExperimentalMixtureReplayBuffer",
+    "ExperimentalTBMixtureReplayBuffer",
     "ReplayBuffer",
     "ReplayConfig",
     "ReplaySampleBatch",
