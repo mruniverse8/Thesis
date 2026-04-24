@@ -49,17 +49,17 @@ def _make_sampled_trajectory(
 
 
 @pytest.mark.parametrize(
-    ("objective", "expected_return_last_trajectory_only"),
+    ("objective", "expected_return_last_valid_trajectory_only"),
     [
         ("tb", False),
         ("db", False),
         ("subtb", True),
     ],
 )
-def test_collect_on_policy_trajectories_passes_last_only_flag_for_subtb(
+def test_collect_on_policy_trajectories_passes_last_valid_only_flag_for_subtb(
     monkeypatch,
     objective: str,
-    expected_return_last_trajectory_only: bool,
+    expected_return_last_valid_trajectory_only: bool,
 ) -> None:
     class DummyModel(torch.nn.Module):
         def __init__(self) -> None:
@@ -70,7 +70,7 @@ def test_collect_on_policy_trajectories_passes_last_only_flag_for_subtb(
 
     def fake_sample_stage_trajectories_for_example(*args, **kwargs):
         del args
-        calls.append(bool(kwargs["return_last_trajectory_only"]))
+        calls.append(bool(kwargs["return_last_valid_trajectory_only"]))
         return []
 
     monkeypatch.setattr(
@@ -94,7 +94,7 @@ def test_collect_on_policy_trajectories_passes_last_only_flag_for_subtb(
     )
 
     assert trajectories == []
-    assert calls == [expected_return_last_trajectory_only]
+    assert calls == [expected_return_last_valid_trajectory_only]
 
 
 def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
@@ -201,7 +201,7 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     assert metrics["replay_size"] == 5.0
     assert metrics["replay_total_action_tokens"] == 12.0
     assert metrics["rollout_append_probability"] == pytest.approx(0.30)
-    assert metrics["rollout_return_last_trajectory_only"] == pytest.approx(0.0)
+    assert metrics["rollout_return_last_valid_trajectory_only"] == pytest.approx(0.0)
     assert metrics["mean_stage_reward"] == pytest.approx((2.0 + 3.0 + 1.0e-4 + 4.0) / 4.0)
     assert metrics["valid_fraction"] == pytest.approx(0.75)
     assert metrics["mean_num_actions"] == pytest.approx(2.5)
@@ -210,16 +210,15 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     assert metrics["termination_fraction_stop_token"] == pytest.approx(0.75)
     assert metrics["termination_fraction_max_stage_new_tokens"] == pytest.approx(0.25)
     assert metrics["num_rollouts"] == pytest.approx(3.0)
-    assert metrics["max_stage_index"] == pytest.approx(2.0)
-    assert metrics["mean_planned_stage_count"] == pytest.approx(8.0)
-    assert metrics["max_planned_stage_count"] == pytest.approx(8.0)
-    assert metrics["mean_realized_stage_count"] == pytest.approx(4.0 / 3.0)
-    assert metrics["max_realized_stage_count"] == pytest.approx(2.0)
-    assert metrics["fraction_rollouts_planned_stage_2_plus"] == pytest.approx(1.0)
-    assert metrics["fraction_rollouts_reaching_stage_2"] == pytest.approx(1.0 / 3.0)
-    assert metrics["fraction_rollouts_reaching_planned_stage_count"] == pytest.approx(0.0)
-    assert metrics["rollout_stage_count_1_fraction"] == pytest.approx(2.0 / 3.0)
-    assert metrics["rollout_stage_count_2_fraction"] == pytest.approx(1.0 / 3.0)
+    assert metrics["mean_planned_trajectory_length"] == pytest.approx(8.0)
+    assert metrics["max_planned_trajectory_length"] == pytest.approx(8.0)
+    assert metrics["mean_trajectory_length"] == pytest.approx(4.0 / 3.0)
+    assert metrics["max_trajectory_length"] == pytest.approx(2.0)
+    assert metrics["fraction_rollouts_planned_trajectory_length_2_plus"] == pytest.approx(1.0)
+    assert metrics["fraction_rollouts_trajectory_length_2_plus"] == pytest.approx(1.0 / 3.0)
+    assert metrics["fraction_rollouts_reaching_planned_trajectory_length"] == pytest.approx(0.0)
+    assert metrics["trajectory_length_1_fraction"] == pytest.approx(2.0 / 3.0)
+    assert metrics["trajectory_length_2_fraction"] == pytest.approx(1.0 / 3.0)
     assert metrics["invalid_reward_floor_fraction"] == pytest.approx(0.25)
     assert metrics["stage1_num_trajectories"] == pytest.approx(3.0)
     assert metrics["stage1_valid_fraction"] == pytest.approx(2.0 / 3.0)
@@ -238,7 +237,7 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     assert result.diagnostic_metrics is not None
     assert result.categorized_diagnostic_metrics is not None
     assert result.categorized_diagnostic_metrics["sec_timer"]["sampling_duration_sec"] > 0.0
-    assert result.categorized_diagnostic_metrics["stage_rollout"]["mean_realized_stage_count"] == pytest.approx(
+    assert result.categorized_diagnostic_metrics["stage_rollout"]["mean_trajectory_length"] == pytest.approx(
         4.0 / 3.0
     )
     assert result.trajectory_preview is not None
@@ -389,15 +388,15 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
                     "valid_fraction": 1.0,
                     "replay_size": 0.0,
                     "replay_total_action_tokens": 0.0,
-                    "mean_realized_stage_count": 1.0,
-                    "fraction_rollouts_reaching_stage_2": 0.0,
+                    "mean_trajectory_length": 1.0,
+                    "fraction_rollouts_trajectory_length_2_plus": 0.0,
                 },
                 diagnostic_metrics={
                     "iteration": float(iteration_index),
                     "grad_norm": 0.5,
                     "sampling_duration_sec": 0.25,
-                    "mean_realized_stage_count": 1.0,
-                    "fraction_rollouts_reaching_stage_2": 0.0,
+                    "mean_trajectory_length": 1.0,
+                    "fraction_rollouts_trajectory_length_2_plus": 0.0,
                 },
                 trajectory_preview={
                     "iteration": iteration_index,
@@ -545,14 +544,14 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "iteration": 1.0,
             "grad_norm": 0.5,
             "sampling_duration_sec": 0.25,
-            "mean_realized_stage_count": 1.0,
-            "fraction_rollouts_reaching_stage_2": 0.0,
+            "mean_trajectory_length": 1.0,
+            "fraction_rollouts_trajectory_length_2_plus": 0.0,
         }
     ]
     assert categorized_calls == {
         "gflownet_diagnostics_stage_rollout": {
-            "mean_realized_stage_count": 1.0,
-            "fraction_rollouts_reaching_stage_2": 0.0,
+            "mean_trajectory_length": 1.0,
+            "fraction_rollouts_trajectory_length_2_plus": 0.0,
         },
         "gflownet_diagnostics_sec_timer": {
             "sampling_duration_sec": 0.25,
@@ -561,7 +560,7 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "grad_norm": 0.5,
         },
     }
-    assert "mean_realized_stage_count" not in headline_calls[0]
+    assert "mean_trajectory_length" not in headline_calls[0]
     assert tracker.summary_calls[0] == (
         {
             "latest_trajectory_preview": "preview-text",
@@ -582,8 +581,8 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "iteration": 1.0,
             "grad_norm": 0.5,
             "sampling_duration_sec": 0.25,
-            "mean_realized_stage_count": 1.0,
-            "fraction_rollouts_reaching_stage_2": 0.0,
+            "mean_trajectory_length": 1.0,
+            "fraction_rollouts_trajectory_length_2_plus": 0.0,
         }
     ]
     assert [json.loads(line) for line in iteration_diagnostics_categorized.read_text().splitlines()] == [
@@ -591,8 +590,8 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "iteration": 1.0,
             "categories": {
                 "stage_rollout": {
-                    "mean_realized_stage_count": 1.0,
-                    "fraction_rollouts_reaching_stage_2": 0.0,
+                    "mean_trajectory_length": 1.0,
+                    "fraction_rollouts_trajectory_length_2_plus": 0.0,
                 },
                 "sec_timer": {
                     "sampling_duration_sec": 0.25,

@@ -358,10 +358,10 @@ def test_train_iteration_returns_epoch_and_optimizer_diagnostics_and_preview(
     assert result.metrics["empty_action_rate"] == 1.0 / 3.0
     assert result.diagnostic_metrics is not None
     assert result.diagnostic_metrics["num_stage_trajectories"] == 3.0
-    assert result.diagnostic_metrics["mean_realized_stage_count"] == 1.0
+    assert result.diagnostic_metrics["mean_trajectory_length"] == 1.0
     assert result.categorized_diagnostic_metrics is not None
     assert result.categorized_diagnostic_metrics["stage_rollout"]["num_stage_trajectories"] == 3.0
-    assert result.categorized_diagnostic_metrics["stage_rollout"]["mean_realized_stage_count"] == 1.0
+    assert result.categorized_diagnostic_metrics["stage_rollout"]["mean_trajectory_length"] == 1.0
     assert result.categorized_diagnostic_metrics["reward_only"]["mean_total_reward"] == 2.0
     assert len(result.epoch_metrics) == 2
     assert [metrics["ppo_epoch_in_iteration"] for metrics in result.epoch_metrics] == [1, 2]
@@ -918,8 +918,8 @@ def test_run_molecule_stage_ppo_logs_iteration_epoch_and_batch_step_diagnostics_
                     "mean_value_loss": 0.4,
                     "num_stage_trajectories": 2.0,
                     "num_rollouts": 1.0,
-                    "mean_realized_stage_count": 1.5,
-                    "fraction_rollouts_reaching_stage_2": 0.5,
+                    "mean_trajectory_length": 1.5,
+                    "fraction_rollouts_trajectory_length_2_plus": 0.5,
                 },
                 diagnostic_metrics={
                     "iteration": float(iteration_index),
@@ -930,8 +930,8 @@ def test_run_molecule_stage_ppo_logs_iteration_epoch_and_batch_step_diagnostics_
                     "mean_value_loss": 0.4,
                     "num_stage_trajectories": 2.0,
                     "num_rollouts": 1.0,
-                    "mean_realized_stage_count": 1.5,
-                    "fraction_rollouts_reaching_stage_2": 0.5,
+                    "mean_trajectory_length": 1.5,
+                    "fraction_rollouts_trajectory_length_2_plus": 0.5,
                 },
                 epoch_metrics=[
                     {
@@ -1175,7 +1175,7 @@ def test_run_molecule_stage_ppo_logs_iteration_epoch_and_batch_step_diagnostics_
         if prefix.startswith("ppo_optimizer_")
     }
     assert headline_calls
-    assert "mean_realized_stage_count" not in headline_calls[0]
+    assert "mean_trajectory_length" not in headline_calls[0]
     assert diagnostic_calls == [
         (
             {
@@ -1187,8 +1187,8 @@ def test_run_molecule_stage_ppo_logs_iteration_epoch_and_batch_step_diagnostics_
                 "mean_value_loss": 0.4,
                 "num_stage_trajectories": 2.0,
                 "num_rollouts": 1.0,
-                "mean_realized_stage_count": 1.5,
-                "fraction_rollouts_reaching_stage_2": 0.5,
+                "mean_trajectory_length": 1.5,
+                "fraction_rollouts_trajectory_length_2_plus": 0.5,
             },
             1,
         ),
@@ -1236,8 +1236,8 @@ def test_run_molecule_stage_ppo_logs_iteration_epoch_and_batch_step_diagnostics_
         ("ppo_diagnostics_stage_rollout", 1): {
             "num_stage_trajectories": 2.0,
             "num_rollouts": 1.0,
-            "mean_realized_stage_count": 1.5,
-            "fraction_rollouts_reaching_stage_2": 0.5,
+            "mean_trajectory_length": 1.5,
+            "fraction_rollouts_trajectory_length_2_plus": 0.5,
         },
         ("ppo_diagnostics_optimizer", 1): {
             "mean_kl": 0.1,
@@ -1344,8 +1344,8 @@ def test_run_molecule_stage_ppo_logs_iteration_epoch_and_batch_step_diagnostics_
             "mean_value_loss": 0.4,
             "num_stage_trajectories": 2.0,
             "num_rollouts": 1.0,
-            "mean_realized_stage_count": 1.5,
-            "fraction_rollouts_reaching_stage_2": 0.5,
+            "mean_trajectory_length": 1.5,
+            "fraction_rollouts_trajectory_length_2_plus": 0.5,
         }
     ]
     assert iteration_diagnostics_categorized_records == [
@@ -1356,8 +1356,8 @@ def test_run_molecule_stage_ppo_logs_iteration_epoch_and_batch_step_diagnostics_
                 "stage_rollout": {
                     "num_stage_trajectories": 2.0,
                     "num_rollouts": 1.0,
-                    "mean_realized_stage_count": 1.5,
-                    "fraction_rollouts_reaching_stage_2": 0.5,
+                    "mean_trajectory_length": 1.5,
+                    "fraction_rollouts_trajectory_length_2_plus": 0.5,
                 },
                 "optimizer": {
                     "mean_kl": 0.1,

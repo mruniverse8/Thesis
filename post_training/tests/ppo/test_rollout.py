@@ -467,12 +467,12 @@ def test_sample_rollout_for_example_continues_after_invalid_stage_when_sampling_
         rng=FixedRandom([0.0]),
     )
 
-    assert len(trajectories) == 2
-    assert trajectories[0].is_valid is False
-    assert trajectories[1].decoder_prefix_text == ""
+    assert len(trajectories) == 1
+    assert trajectories[0].is_valid is True
+    assert trajectories[0].decoder_prefix_text == ""
 
 
-def test_sample_rollout_for_example_trusts_invalid_sampled_selfies_for_prefix_history(
+def test_sample_rollout_for_example_keeps_invalid_sample_out_of_prefix_history(
     monkeypatch,
 ) -> None:
     class DummyPolicyValueModel:
@@ -549,9 +549,9 @@ def test_sample_rollout_for_example_trusts_invalid_sampled_selfies_for_prefix_hi
         rng=FixedRandom([0.0]),
     )
 
-    assert len(trajectories) == 2
-    assert trajectories[0].is_valid is False
-    assert trajectories[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]"])
+    assert len(trajectories) == 1
+    assert trajectories[0].is_valid is True
+    assert trajectories[0].decoder_prefix_text == ""
 
 
 def test_sample_rollout_for_example_appends_stage_two_plus_only_when_probability_allows_it(

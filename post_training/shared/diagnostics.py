@@ -47,11 +47,10 @@ _STAGE_ROLLOUT_METRIC_KEYS = frozenset(
         "max_action_token_count",
         "empty_action_rate",
         "num_rollouts",
-        "max_stage_index",
-        "mean_planned_stage_count",
-        "max_planned_stage_count",
-        "mean_realized_stage_count",
-        "max_realized_stage_count",
+        "mean_planned_trajectory_length",
+        "max_planned_trajectory_length",
+        "mean_trajectory_length",
+        "max_trajectory_length",
         "rollout_append_probability",
     }
 )
@@ -139,7 +138,7 @@ def resolve_metric_category(metric_key: str) -> str:
 
     if (
         metric_key in _STAGE_ROLLOUT_METRIC_KEYS
-        or metric_key.startswith(("fraction_rollouts_", "rollout_stage_count_"))
+        or metric_key.startswith(("fraction_rollouts_", "trajectory_length_"))
         or (_is_stage_metric(metric_key) and metric_key.endswith(("_num_trajectories", "_mean_num_actions")))
     ):
         return "stage_rollout"

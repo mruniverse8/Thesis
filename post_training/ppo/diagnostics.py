@@ -113,18 +113,17 @@ def rollout_stage_metrics(
 ) -> dict[str, float]:
     metrics: dict[str, float] = {
         "num_rollouts": 0.0,
-        "max_stage_index": 0.0,
-        "mean_planned_stage_count": 0.0,
-        "max_planned_stage_count": 0.0,
-        "mean_realized_stage_count": 0.0,
-        "max_realized_stage_count": 0.0,
-        "fraction_rollouts_planned_stage_2_plus": 0.0,
-        "fraction_rollouts_reaching_stage_2": 0.0,
-        "fraction_rollouts_reaching_stage_3_plus": 0.0,
-        "fraction_rollouts_reaching_planned_stage_count": 0.0,
-        "rollout_stage_count_1_fraction": 0.0,
-        "rollout_stage_count_2_fraction": 0.0,
-        "rollout_stage_count_3_plus_fraction": 0.0,
+        "mean_planned_trajectory_length": 0.0,
+        "max_planned_trajectory_length": 0.0,
+        "mean_trajectory_length": 0.0,
+        "max_trajectory_length": 0.0,
+        "fraction_rollouts_planned_trajectory_length_2_plus": 0.0,
+        "fraction_rollouts_trajectory_length_2_plus": 0.0,
+        "fraction_rollouts_trajectory_length_3_plus": 0.0,
+        "fraction_rollouts_reaching_planned_trajectory_length": 0.0,
+        "trajectory_length_1_fraction": 0.0,
+        "trajectory_length_2_fraction": 0.0,
+        "trajectory_length_3_plus_fraction": 0.0,
     }
     for stage_index in stage_indices:
         stage_prefix = f"stage{stage_index}_"
@@ -151,55 +150,62 @@ def rollout_stage_metrics(
     for trajectory in trajectories:
         grouped_rollouts[trajectory.rollout_id].append(trajectory)
 
-    planned_stage_counts: list[int] = []
-    realized_stage_counts: list[int] = []
-    planned_stage_2_plus = 0
-    reached_stage_2 = 0
-    reached_stage_3_plus = 0
-    reached_planned_stage_count = 0
+    planned_trajectory_lengths: list[int] = []
+    trajectory_lengths: list[int] = []
+    planned_trajectory_length_2_plus = 0
+    trajectory_length_2_plus = 0
+    trajectory_length_3_plus = 0
+    reached_planned_trajectory_length = 0
 
     for rollout in grouped_rollouts.values():
         ordered_rollout = sorted(rollout, key=lambda item: item.stage_index)
-        realized_stage_count = len(ordered_rollout)
-        target_stage_count = (
+        trajectory_length = len(ordered_rollout)
+        planned_trajectory_length = (
             max(1, int(max_molecules_per_sequence))
             if max_molecules_per_sequence is not None
-            else max(1, realized_stage_count)
+            else max(1, trajectory_length)
         )
-        planned_stage_counts.append(target_stage_count)
-        realized_stage_counts.append(realized_stage_count)
-        if target_stage_count >= 2:
-            planned_stage_2_plus += 1
-        if realized_stage_count >= 2:
-            reached_stage_2 += 1
-        if realized_stage_count >= 3:
-            reached_stage_3_plus += 1
-        if realized_stage_count >= target_stage_count:
-            reached_planned_stage_count += 1
+        planned_trajectory_lengths.append(planned_trajectory_length)
+        trajectory_lengths.append(trajectory_length)
+        if planned_trajectory_length >= 2:
+            planned_trajectory_length_2_plus += 1
+        if trajectory_length >= 2:
+            trajectory_length_2_plus += 1
+        if trajectory_length >= 3:
+            trajectory_length_3_plus += 1
+        if trajectory_length >= planned_trajectory_length:
+            reached_planned_trajectory_length += 1
 
     num_rollouts = len(grouped_rollouts)
     metrics.update(
         {
             "num_rollouts": float(num_rollouts),
-            "max_stage_index": float(max(trajectory.stage_index for trajectory in trajectories)),
-            "mean_planned_stage_count": float(sum(planned_stage_counts) / num_rollouts),
-            "max_planned_stage_count": float(max(planned_stage_counts)),
-            "mean_realized_stage_count": float(sum(realized_stage_counts) / num_rollouts),
-            "max_realized_stage_count": float(max(realized_stage_counts)),
-            "fraction_rollouts_planned_stage_2_plus": float(planned_stage_2_plus / num_rollouts),
-            "fraction_rollouts_reaching_stage_2": float(reached_stage_2 / num_rollouts),
-            "fraction_rollouts_reaching_stage_3_plus": float(reached_stage_3_plus / num_rollouts),
-            "fraction_rollouts_reaching_planned_stage_count": float(
-                reached_planned_stage_count / num_rollouts
+            "mean_planned_trajectory_length": float(
+                sum(planned_trajectory_lengths) / num_rollouts
             ),
-            "rollout_stage_count_1_fraction": float(
-                sum(int(count == 1) for count in realized_stage_counts) / num_rollouts
+            "max_planned_trajectory_length": float(max(planned_trajectory_lengths)),
+            "mean_trajectory_length": float(sum(trajectory_lengths) / num_rollouts),
+            "max_trajectory_length": float(max(trajectory_lengths)),
+            "fraction_rollouts_planned_trajectory_length_2_plus": float(
+                planned_trajectory_length_2_plus / num_rollouts
             ),
-            "rollout_stage_count_2_fraction": float(
-                sum(int(count == 2) for count in realized_stage_counts) / num_rollouts
+            "fraction_rollouts_trajectory_length_2_plus": float(
+                trajectory_length_2_plus / num_rollouts
             ),
-            "rollout_stage_count_3_plus_fraction": float(
-                sum(int(count >= 3) for count in realized_stage_counts) / num_rollouts
+            "fraction_rollouts_trajectory_length_3_plus": float(
+                trajectory_length_3_plus / num_rollouts
+            ),
+            "fraction_rollouts_reaching_planned_trajectory_length": float(
+                reached_planned_trajectory_length / num_rollouts
+            ),
+            "trajectory_length_1_fraction": float(
+                sum(int(length == 1) for length in trajectory_lengths) / num_rollouts
+            ),
+            "trajectory_length_2_fraction": float(
+                sum(int(length == 2) for length in trajectory_lengths) / num_rollouts
+            ),
+            "trajectory_length_3_plus_fraction": float(
+                sum(int(length >= 3) for length in trajectory_lengths) / num_rollouts
             ),
         }
     )

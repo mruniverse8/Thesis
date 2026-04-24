@@ -357,17 +357,21 @@ def sample_rollout_for_example(
             is_duplicate=reward_breakdown.is_duplicate,
             metadata=dict(stage_sample.get("metadata", {})),
         )
-        if trajectory.sampled_selfies:
+        if trajectory.is_valid and trajectory.sampled_selfies:
             previous_sampled_selfies.append(trajectory.sampled_selfies)
 
-        should_append = stage_index == 1 or (
-            float(generator.random()) < generation_config.append_probability
-        )
-        if should_append:
-            trajectories.append(trajectory)
+        if trajectory.is_valid:
+            should_append = stage_index == 1 or (
+                float(generator.random()) < generation_config.append_probability
+            )
+            if should_append:
+                trajectories.append(trajectory)
 
         if trajectory.termination_reason != "stop_token":
             break
+        if generation_config.terminate_on_invalid_stage and not trajectory.is_valid:
+            stage_index += 1
+            continue
         stage_index += 1
 
     return trajectories

@@ -172,7 +172,7 @@ def test_sample_stage_trajectories_for_example_updates_prefix_after_sampled_stag
     assert trajectories[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]"])
 
 
-def test_sample_stage_trajectories_for_example_stops_after_invalid_stage_when_configured(
+def test_sample_stage_trajectories_for_example_ignores_invalid_stage_when_configured(
     monkeypatch,
 ) -> None:
     tokenizer = DummyTokenizer(
@@ -221,8 +221,7 @@ def test_sample_stage_trajectories_for_example_stops_after_invalid_stage_when_co
         device=torch.device("cpu"),
     )
 
-    assert len(trajectories) == 1
-    assert trajectories[0].is_valid is False
+    assert trajectories == []
 
 
 def test_sample_stage_trajectories_for_example_keeps_invalid_sample_out_of_prefix_history(
@@ -308,10 +307,10 @@ def test_sample_stage_trajectories_for_example_keeps_invalid_sample_out_of_prefi
         device=torch.device("cpu"),
     )
 
-    assert len(trajectories) == 2
-    assert trajectories[0].is_valid is False
-    assert trajectories[1].decoder_prefix_text == ""
-    assert trajectories[1].previous_sampled_selfies == ()
+    assert len(trajectories) == 1
+    assert trajectories[0].is_valid is True
+    assert trajectories[0].decoder_prefix_text == ""
+    assert trajectories[0].previous_sampled_selfies == ()
 
 
 def test_sample_stage_trajectories_for_example_appends_stage_two_plus_only_when_probability_allows_it(
@@ -398,7 +397,7 @@ def test_sample_stage_trajectories_for_example_appends_stage_two_plus_only_when_
     assert skipped[1].decoder_prefix_text == build_stage_prefix(["[C][C][O]", "[C][C][N]"])
 
 
-def test_sample_stage_trajectories_for_example_can_keep_only_last_generated_stage(
+def test_sample_stage_trajectories_for_example_can_keep_only_last_valid_stage(
     monkeypatch,
 ) -> None:
     tokenizer = DummyTokenizer(
@@ -467,7 +466,7 @@ def test_sample_stage_trajectories_for_example_can_keep_only_last_generated_stag
         invalid_terminal_reward=1.0e-4,
         device=torch.device("cpu"),
         rng=FixedRandom([]),
-        return_last_trajectory_only=True,
+        return_last_valid_trajectory_only=True,
     )
 
     assert len(trajectories) == 1
@@ -476,7 +475,7 @@ def test_sample_stage_trajectories_for_example_can_keep_only_last_generated_stag
     assert trajectories[0].previous_sampled_selfies == ("[C][C][O]", "[C][C][N]")
 
 
-def test_sample_stage_trajectories_for_example_last_only_keeps_invalid_final_stage(
+def test_sample_stage_trajectories_for_example_last_only_skips_invalid_final_stage(
     monkeypatch,
 ) -> None:
     tokenizer = DummyTokenizer(
@@ -536,12 +535,66 @@ def test_sample_stage_trajectories_for_example_last_only_keeps_invalid_final_sta
         invalid_terminal_reward=1.0e-4,
         device=torch.device("cpu"),
         rng=FixedRandom([]),
-        return_last_trajectory_only=True,
+        return_last_valid_trajectory_only=True,
     )
 
-    assert [trajectory.stage_index for trajectory in trajectories] == [2]
-    assert trajectories[0].is_valid is False
-    assert trajectories[0].termination_reason == "max_stage_new_tokens"
+    assert [trajectory.stage_index for trajectory in trajectories] == [1]
+    assert trajectories[0].is_valid is True
+    assert trajectories[0].termination_reason == "stop_token"
+
+
+def test_sample_stage_trajectories_for_example_last_only_returns_empty_when_no_valid_stage(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<eom>",
+        },
+        {EOM_TOKEN: 1},
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    monkeypatch.setattr(
+        "post_training.gflownet.rollout.sample_stage",
+        lambda *args, **kwargs: {
+            "stage_text": "<eom>",
+            "sampled_selfies": None,
+            "action_token_ids": (),
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+        },
+    )
+
+    trajectories = sample_stage_trajectories_for_example(
+        DummyModel(),
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=GFlowNetRolloutConfig(
+            max_molecules_per_sequence=3,
+            append_probability=0.0,
+            terminate_on_invalid_stage=True,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandom([]),
+        return_last_valid_trajectory_only=True,
+    )
+
+    assert trajectories == []
 
 
 def test_sample_stage_trajectories_for_example_keeps_skipped_early_break_trajectory(

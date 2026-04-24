@@ -257,7 +257,7 @@ def sample_stage_trajectories_for_example(
     device: torch.device,
     stage_token_constraints: StageTokenConstraints | None = None,
     rng: random.Random | None = None,
-    return_last_trajectory_only: bool = False,
+    return_last_valid_trajectory_only: bool = False,
 ) -> list[SampledStageTrajectory]:
     prompt_inputs = encode_prompt(
         tokenizer,
@@ -270,7 +270,7 @@ def sample_stage_trajectories_for_example(
 
     previous_sampled_selfies: list[str] = []
     trajectories: list[SampledStageTrajectory] = []
-    last_trajectory: SampledStageTrajectory | None = None
+    last_valid_trajectory: SampledStageTrajectory | None = None
     generator = rng or random
     stage_index = 1
     while stage_index <= planned_stage_count:
@@ -308,12 +308,12 @@ def sample_stage_trajectories_for_example(
             reward_config=reward_config,
             invalid_terminal_reward=invalid_terminal_reward,
         )
-        last_trajectory = trajectory
         if trajectory.is_valid and trajectory.sampled_selfies:
+            last_valid_trajectory = trajectory
             previous_sampled_selfies.append(trajectory.sampled_selfies)
 
         trajectory_appended = False
-        if not return_last_trajectory_only:
+        if trajectory.is_valid and not return_last_valid_trajectory_only:
             should_append = stage_index == 1 or (
                 float(generator.random()) < generation_config.append_probability
             )
@@ -322,13 +322,18 @@ def sample_stage_trajectories_for_example(
                 trajectory_appended = True
 
         if trajectory.termination_reason != "stop_token":
-            if not return_last_trajectory_only and not trajectory_appended:
+            if (
+                trajectory.is_valid
+                and not return_last_valid_trajectory_only
+                and not trajectory_appended
+            ):
                 trajectories.append(trajectory)
             break
         if generation_config.terminate_on_invalid_stage and not trajectory.is_valid:
-            break
+            stage_index += 1
+            continue
         stage_index += 1
 
-    if return_last_trajectory_only:
-        return [last_trajectory] if last_trajectory is not None else []
+    if return_last_valid_trajectory_only:
+        return [last_valid_trajectory] if last_valid_trajectory is not None else []
     return trajectories
