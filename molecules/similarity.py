@@ -35,7 +35,7 @@ def _safe_similarity(
         n_bits=n_bits,
     )
     if fp_a is None or fp_b is None:
-        assert False
+        return 0.0
 
     if similarity_name == "dice":
         return float(DataStructs.DiceSimilarity(fp_a, fp_b))

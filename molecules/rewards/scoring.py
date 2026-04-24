@@ -58,16 +58,6 @@ def _compute_component(
     similarity_fn,
     exponent: float,
 ) -> RewardComponent:
-    if not candidate.is_valid:
-        return RewardComponent(
-            reward=0.0,
-            max_similarity=0.0,
-            exponent=exponent,
-            best_index=None,
-            best_reference=None,
-            num_references=len(references),
-        )
-
     best_similarity = 0.0
     best_index: int | None = None
     best_reference: str | None = None
