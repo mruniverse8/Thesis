@@ -16,6 +16,7 @@ from post_training.shared.decoding import (
     resolve_stage_token_constraints,
 )
 from post_training.shared.sequence import build_stage_prefix, project_sampled_stage_to_no_h
+from molecules.selfies import decode_biot5_selfies
 
 from .config import GFlowNetRolloutConfig
 from .model import GFlowNetModel
@@ -99,6 +100,55 @@ def sample_next_token(
     return next_token, next_log_prob, entropy
 
 
+def _nonempty_metadata_text(metadata: dict[str, Any], key: str) -> str | None:
+    value = metadata.get(key)
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _cleanup_selected_selfies(raw_stage_text: str | None) -> str | None:
+    if raw_stage_text is None or not str(raw_stage_text).strip():
+        return None
+    try:
+        selected_selfies = decode_biot5_selfies(str(raw_stage_text)).get("selected_selfies")
+    except Exception:
+        return None
+    if selected_selfies is None:
+        return None
+    text = str(selected_selfies).strip()
+    return text or None
+
+
+def _resolve_invalid_candidate_text(
+    *,
+    sampled_selfies: str | None,
+    stage_text: str,
+    metadata: dict[str, Any],
+) -> tuple[str | None, str | None]:
+    if sampled_selfies is not None:
+        return None, None
+
+    raw_sampled_selfies = _nonempty_metadata_text(metadata, "raw_sampled_selfies")
+    if raw_sampled_selfies is not None:
+        return raw_sampled_selfies, "raw_sampled_selfies"
+
+    raw_stage_text = _nonempty_metadata_text(metadata, "raw_stage_text")
+    cleanup_selected_selfies = _cleanup_selected_selfies(raw_stage_text)
+    if cleanup_selected_selfies is not None:
+        return cleanup_selected_selfies, "cleanup_selected_selfies"
+
+    if raw_stage_text is not None:
+        return raw_stage_text, "raw_stage_text"
+
+    fallback_stage_text = str(stage_text).strip()
+    if fallback_stage_text:
+        return fallback_stage_text, "stage_text"
+
+    return None, None
+
+
 def build_sampled_stage_trajectory_from_generation(
     *,
     example: dict[str, Any],
@@ -118,6 +168,12 @@ def build_sampled_stage_trajectory_from_generation(
     prompt_text = str(example["prompt"])
     description = str(example["description"])
     target_selfies_list = tuple(str(item) for item in example["target_selfies_list"])
+    trajectory_metadata = dict(metadata or {})
+    invalid_candidate_text, invalid_candidate_text_source = _resolve_invalid_candidate_text(
+        sampled_selfies=sampled_selfies,
+        stage_text=stage_text,
+        metadata=trajectory_metadata,
+    )
 
     reward_summary = score_stage_terminal_reward(
         sampled_selfies,
@@ -126,6 +182,7 @@ def build_sampled_stage_trajectory_from_generation(
         num_prefix_states=len(action_token_ids) + 1,
         reward_config=reward_config,
         invalid_terminal_reward=invalid_terminal_reward,
+        invalid_candidate_text=invalid_candidate_text,
     )
     return SampledStageTrajectory(
         rollout_id=rollout_id,
@@ -147,7 +204,9 @@ def build_sampled_stage_trajectory_from_generation(
         is_valid=reward_summary.is_valid_terminal,
         is_duplicate=reward_summary.is_duplicate_terminal,
         metadata={
-            **dict(metadata or {}),
+            **trajectory_metadata,
+            "invalid_candidate_text": invalid_candidate_text,
+            "invalid_candidate_text_source": invalid_candidate_text_source,
             "num_actions": len(action_token_ids),
             "stop_action_token": EOM_TOKEN,
         },

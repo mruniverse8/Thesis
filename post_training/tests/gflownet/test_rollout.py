@@ -153,6 +153,36 @@ def test_build_sampled_stage_trajectory_from_generation_keeps_stop_out_of_action
     assert trajectory.to_dict()["previous_sampled_selfies"] == []
 
 
+def test_build_sampled_stage_trajectory_uses_cleanup_text_for_invalid_reward_fallback() -> None:
+    trajectory = build_sampled_stage_trajectory_from_generation(
+        example={
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]"],
+        },
+        rollout_id="rollout-1",
+        stage_index=1,
+        decoder_prefix_text="",
+        previous_sampled_selfies=(),
+        stage_text="",
+        sampled_selfies=None,
+        action_token_ids=(1, 2),
+        metadata={"raw_stage_text": "<bom>[C][C][C]"},
+        stop_token=None,
+        termination_reason="max_stage_new_tokens",
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+    )
+
+    assert trajectory.sampled_selfies is None
+    assert trajectory.is_valid is False
+    assert trajectory.metadata["invalid_candidate_text"] == "[C][C][C]"
+    assert trajectory.metadata["invalid_candidate_text_source"] == "cleanup_selected_selfies"
+    assert trajectory.reward_breakdown["match_reward"] > 0.0
+    assert trajectory.terminal_reward > 5.0e-5
+
+
 def test_sample_stage_trajectories_for_example_updates_prefix_after_sampled_stage(monkeypatch) -> None:
     tokenizer = DummyTokenizer(
         {
@@ -430,8 +460,9 @@ def test_sample_stage_trajectories_for_example_keeps_invalid_sample_out_of_prefi
         num_prefix_states,
         reward_config,
         invalid_terminal_reward,
+        invalid_candidate_text=None,
     ):
-        del targets, reward_config
+        del targets, reward_config, invalid_candidate_text
         terminal_reward = 2.0 if candidate_selfies == "[C][C][N]" else invalid_terminal_reward
         return SimpleNamespace(
             reward_breakdown={"previous_candidates": tuple(previous_candidates)},

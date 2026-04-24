@@ -77,6 +77,30 @@ def test_score_stage_terminal_reward_keeps_invalid_terminal_penalty_after_simila
     assert summary.prefix_rewards == pytest.approx((1.0e-4, 0.25))
 
 
+def test_score_stage_terminal_reward_uses_invalid_candidate_text_for_ngram_fallback() -> None:
+    summary = score_stage_terminal_reward(
+        None,
+        invalid_candidate_text="[C][C][Bad]",
+        targets=["[C][C][O]"],
+        previous_candidates=[],
+        num_prefix_states=2,
+        reward_config=RewardConfig(
+            match_alpha=1.0,
+            penalty_invalid=0.25,
+            invalid_similarity_ngram_size=3,
+            reward_variant="reward_var2",
+        ),
+        invalid_terminal_reward=1.0e-4,
+    )
+
+    assert summary.is_valid_terminal is False
+    assert summary.reward_breakdown["is_valid"] is False
+    assert summary.reward_breakdown["match_reward"] == pytest.approx(0.125)
+    assert summary.reward_breakdown["total_reward"] == pytest.approx(0.125)
+    assert summary.reward_breakdown["amplified_reward"] == pytest.approx(1.0)
+    assert summary.terminal_reward == pytest.approx(0.25)
+
+
 def test_score_stage_terminal_reward_applies_reward_var2_duplicate_penalty_when_configured() -> None:
     summary = score_stage_terminal_reward(
         "[C][C][O]",

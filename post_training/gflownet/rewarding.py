@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Sequence
 
+from molecules.representations import MoleculeRecord
 from reward_utils.defaults import RewardConfig
 from reward_utils.rewards import RewardBreakdown
 
@@ -30,6 +31,21 @@ def _reward_breakdown_to_dict(breakdown: RewardBreakdown) -> dict[str, object]:
     }
 
 
+def _invalid_candidate_record(text: str) -> MoleculeRecord:
+    normalized = str(text).strip()
+    return MoleculeRecord(
+        input_text=str(text),
+        input_representation="selfies",
+        normalized_input=normalized,
+        smiles=None,
+        canonical_smiles=None,
+        is_valid=False,
+        used_selfies_decoder=True,
+        error="Invalid generated stage used only for n-gram reward fallback.",
+        mol=None,
+    )
+
+
 def score_stage_terminal_reward(
     candidate_selfies: str | None,
     *,
@@ -38,6 +54,7 @@ def score_stage_terminal_reward(
     num_prefix_states: int,
     reward_config: RewardConfig | None = None,
     invalid_terminal_reward: float = 1.0e-4,
+    invalid_candidate_text: str | None = None,
 ) -> StageRewardSummary:
     if num_prefix_states <= 0:
         raise ValueError("num_prefix_states must be positive.")
@@ -45,8 +62,15 @@ def score_stage_terminal_reward(
     effective_reward_config = reward_config or RewardConfig()
     penalty_invalid = float(effective_reward_config.penalty_invalid)
     reward_floor = max(float(invalid_terminal_reward), 1.0e-12)
+    candidate_for_reward: str | MoleculeRecord
+    if candidate_selfies is not None:
+        candidate_for_reward = candidate_selfies.strip()
+    elif invalid_candidate_text is not None and str(invalid_candidate_text).strip():
+        candidate_for_reward = _invalid_candidate_record(str(invalid_candidate_text))
+    else:
+        candidate_for_reward = ""
     breakdown = score_stage_reward(
-        (candidate_selfies or "").strip(),
+        candidate_for_reward,
         targets=targets,
         previous_candidates=previous_candidates,
         config=effective_reward_config,

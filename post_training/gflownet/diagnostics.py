@@ -368,6 +368,14 @@ def build_trajectory_preview_payload(
                 "cleanup_selected_selfies_sequence": [
                     result.get("selected_selfies") for result in cleanup_results
                 ],
+                "invalid_candidate_text_sequence": [
+                    trajectory.metadata.get("invalid_candidate_text")
+                    for trajectory in ordered_rollout
+                ],
+                "invalid_candidate_text_source_sequence": [
+                    trajectory.metadata.get("invalid_candidate_text_source")
+                    for trajectory in ordered_rollout
+                ],
                 "recoverable_by_cleanup_sequence": [
                     bool(result.get("is_valid_selfies")) and trajectory.sampled_selfies is None
                     for trajectory, result in zip(ordered_rollout, cleanup_results)
@@ -461,6 +469,20 @@ def build_trajectory_preview_payload(
                         "cleanup_selected_selfies="
                         + _render_sequence(
                             record["cleanup_selected_selfies_sequence"],
+                            max_chars=max_chars,
+                        )
+                    ),
+                    (
+                        "invalid_candidate_text="
+                        + _render_sequence(
+                            record["invalid_candidate_text_sequence"],
+                            max_chars=max_chars,
+                        )
+                    ),
+                    (
+                        "invalid_candidate_text_source="
+                        + _render_sequence(
+                            record["invalid_candidate_text_source_sequence"],
                             max_chars=max_chars,
                         )
                     ),

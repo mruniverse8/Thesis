@@ -2,7 +2,11 @@ import pytest
 
 from src.constants import EOM_TOKEN
 
-from post_training.gflownet.diagnostics import rollout_stage_metrics, termination_reason_metrics
+from post_training.gflownet.diagnostics import (
+    build_trajectory_preview_payload,
+    rollout_stage_metrics,
+    termination_reason_metrics,
+)
 from post_training.gflownet.trajectory import SampledStageTrajectory
 
 
@@ -15,6 +19,7 @@ def _make_sampled_trajectory(
     is_valid: bool = True,
     action_token_ids: tuple[int, ...] = (1, 2),
     target_selfies_list: tuple[str, ...] = ("[C][C][O]",),
+    metadata: dict[str, object] | None = None,
 ) -> SampledStageTrajectory:
     return SampledStageTrajectory(
         rollout_id=rollout_id,
@@ -35,6 +40,7 @@ def _make_sampled_trajectory(
         termination_reason=termination_reason,
         is_valid=is_valid,
         is_duplicate=False,
+        metadata=dict(metadata or {}),
     )
 
 
@@ -142,3 +148,31 @@ def test_rollout_stage_metrics_return_zeroed_defaults_for_empty_batches() -> Non
     assert metrics["stage1_termination_fraction_stop_token"] == pytest.approx(0.0)
     assert metrics["stage2_num_trajectories"] == pytest.approx(0.0)
     assert metrics["stage2_termination_fraction_max_stage_new_tokens"] == pytest.approx(0.0)
+
+
+def test_trajectory_preview_includes_invalid_candidate_text_diagnostics() -> None:
+    preview = build_trajectory_preview_payload(
+        [_make_sampled_trajectory(
+            rollout_id="rollout-1",
+            stage_index=1,
+            terminal_reward=0.25,
+            termination_reason="max_stage_new_tokens",
+            is_valid=False,
+            metadata={
+                "raw_stage_text": "<bom>[C][C][Bad]",
+                "invalid_candidate_text": "[C][C][Bad]",
+                "invalid_candidate_text_source": "cleanup_selected_selfies",
+            },
+        )],
+        iteration_index=1,
+        num_samples=1,
+        max_chars=240,
+        tokenizer=None,
+    )
+
+    assert preview is not None
+    record = preview["records"][0]
+    assert record["invalid_candidate_text_sequence"] == ["[C][C][Bad]"]
+    assert record["invalid_candidate_text_source_sequence"] == ["cleanup_selected_selfies"]
+    assert "invalid_candidate_text=[C][C][Bad]" in preview["tracker_text"]
+    assert "invalid_candidate_text_source=cleanup_selected_selfies" in preview["tracker_text"]
