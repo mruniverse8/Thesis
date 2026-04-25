@@ -47,7 +47,7 @@ gflownet:
   gflownet_iterations: 10
   batch_size: 2
   objective: tb
-  learning_rate: 5.0e-5
+  learning_rate: 5.0e-7
   max_grad_norm: 1.0
   diagnostic_log_every_iterations: 5
   trajectory_preview_every_iterations: 5

@@ -6,6 +6,7 @@ from typing import Sequence
 from molecules.defaults import (
     DEFAULT_DIVERSITY_BETA,
     DEFAULT_DIVERSITY_WEIGHT,
+    DEFAULT_ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK,
     DEFAULT_FINGERPRINT_NUM_BITS,
     DEFAULT_FINGERPRINT_RADIUS,
     DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE,
@@ -117,6 +118,9 @@ def compute_rmatch(
     n_bits: int = DEFAULT_FINGERPRINT_NUM_BITS,
     invalid_fallback_penalty: float = DEFAULT_PENALTY_INVALID,
     invalid_similarity_ngram_size: int = DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE,
+    enable_invalid_similarity_ngram_fallback: bool = (
+        DEFAULT_ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK
+    ),
 ) -> RewardComponent:
     candidate_record = ensure_molecule_record(candidate, representation=candidate_representation)
     target_records = _materialize_records(targets, representation=target_representation)
@@ -130,6 +134,7 @@ def compute_rmatch(
             n_bits=n_bits,
             invalid_fallback_penalty=invalid_fallback_penalty,
             invalid_similarity_ngram_size=invalid_similarity_ngram_size,
+            enable_invalid_similarity_ngram_fallback=enable_invalid_similarity_ngram_fallback,
         ),
         exponent=alpha,
     )
@@ -146,6 +151,9 @@ def compute_rdiv(
     n_bits: int = DEFAULT_FINGERPRINT_NUM_BITS,
     invalid_fallback_penalty: float = DEFAULT_PENALTY_INVALID,
     invalid_similarity_ngram_size: int = DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE,
+    enable_invalid_similarity_ngram_fallback: bool = (
+        DEFAULT_ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK
+    ),
 ) -> RewardComponent:
     candidate_record = ensure_molecule_record(candidate, representation=candidate_representation)
     previous_records = _materialize_records(previous_candidates, representation=previous_representation)
@@ -170,6 +178,7 @@ def compute_rdiv(
             n_bits=n_bits,
             invalid_fallback_penalty=invalid_fallback_penalty,
             invalid_similarity_ngram_size=invalid_similarity_ngram_size,
+            enable_invalid_similarity_ngram_fallback=enable_invalid_similarity_ngram_fallback,
         ),
         exponent=beta,
     )
@@ -205,6 +214,9 @@ def _compute_total_reward_var1(
         n_bits=reward_config.fingerprint_num_bits,
         invalid_fallback_penalty=reward_config.penalty_invalid,
         invalid_similarity_ngram_size=reward_config.invalid_similarity_ngram_size,
+        enable_invalid_similarity_ngram_fallback=(
+            reward_config.enable_invalid_similarity_ngram_fallback
+        ),
     )
     diversity_component = compute_rdiv(
         candidate_record,
@@ -214,6 +226,9 @@ def _compute_total_reward_var1(
         n_bits=reward_config.fingerprint_num_bits,
         invalid_fallback_penalty=reward_config.penalty_invalid,
         invalid_similarity_ngram_size=reward_config.invalid_similarity_ngram_size,
+        enable_invalid_similarity_ngram_fallback=(
+            reward_config.enable_invalid_similarity_ngram_fallback
+        ),
     )
     total_reward = match_weight * match_component.reward + diversity_weight * diversity_component.reward
     return RewardBreakdown(
@@ -247,6 +262,9 @@ def _compute_total_reward_var2(
         n_bits=reward_config.fingerprint_num_bits,
         invalid_fallback_penalty=reward_config.penalty_invalid,
         invalid_similarity_ngram_size=reward_config.invalid_similarity_ngram_size,
+        enable_invalid_similarity_ngram_fallback=(
+            reward_config.enable_invalid_similarity_ngram_fallback
+        ),
     )
     diversity_component = _zero_reward_component(
         exponent=reward_config.diversity_beta,
@@ -290,6 +308,9 @@ def _compute_total_reward_var3(
         n_bits=reward_config.fingerprint_num_bits,
         invalid_fallback_penalty=reward_config.penalty_invalid,
         invalid_similarity_ngram_size=reward_config.invalid_similarity_ngram_size,
+        enable_invalid_similarity_ngram_fallback=(
+            reward_config.enable_invalid_similarity_ngram_fallback
+        ),
     )
     diversity_component = compute_rdiv(
         candidate_record,
@@ -299,6 +320,9 @@ def _compute_total_reward_var3(
         n_bits=reward_config.fingerprint_num_bits,
         invalid_fallback_penalty=reward_config.penalty_invalid,
         invalid_similarity_ngram_size=reward_config.invalid_similarity_ngram_size,
+        enable_invalid_similarity_ngram_fallback=(
+            reward_config.enable_invalid_similarity_ngram_fallback
+        ),
     )
     total_reward = (
         match_weight * match_component.reward

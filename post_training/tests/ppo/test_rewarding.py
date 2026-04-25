@@ -15,12 +15,19 @@ def test_build_reward_config_uses_chebi_default_when_not_overridden() -> None:
     assert config.reward_variant == "reward_var2"
     assert config.plus_valid == pytest.approx(0.8)
     assert config.invalid_similarity_ngram_size == 3
+    assert config.enable_invalid_similarity_ngram_fallback is True
 
 
 def test_build_reward_config_accepts_invalid_similarity_ngram_size() -> None:
     config = build_reward_config({"invalid_similarity_ngram_size": 2})
 
     assert config.invalid_similarity_ngram_size == 2
+
+
+def test_build_reward_config_accepts_disabled_invalid_similarity_ngram_fallback() -> None:
+    config = build_reward_config({"enable_invalid_similarity_ngram_fallback": False})
+
+    assert config.enable_invalid_similarity_ngram_fallback is False
 
 
 def test_score_stage_candidate_handles_first_stage() -> None:

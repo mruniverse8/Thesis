@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .defaults import (
+    DEFAULT_ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK,
     DEFAULT_FINGERPRINT_NUM_BITS,
     DEFAULT_FINGERPRINT_RADIUS,
     DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE,
@@ -78,6 +79,9 @@ def _safe_similarity(
     n_bits: int = DEFAULT_FINGERPRINT_NUM_BITS,
     invalid_fallback_penalty: float = DEFAULT_PENALTY_INVALID,
     invalid_similarity_ngram_size: int = DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE,
+    enable_invalid_similarity_ngram_fallback: bool = (
+        DEFAULT_ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK
+    ),
 ) -> float:
     ensure_rdkit()
     record_a = ensure_molecule_record(molecule_a, representation=representation_a)
@@ -95,6 +99,8 @@ def _safe_similarity(
         n_bits=n_bits,
     )
     if fp_a is None or fp_b is None:
+        if not enable_invalid_similarity_ngram_fallback:
+            return 0.0
         fallback_similarity = token_ngram_similarity(
             record_a.input_text,
             record_b.input_text,
@@ -122,6 +128,9 @@ def compute_dice_similarity(
     n_bits: int = DEFAULT_FINGERPRINT_NUM_BITS,
     invalid_fallback_penalty: float = DEFAULT_PENALTY_INVALID,
     invalid_similarity_ngram_size: int = DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE,
+    enable_invalid_similarity_ngram_fallback: bool = (
+        DEFAULT_ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK
+    ),
 ) -> float:
     return _safe_similarity(
         molecule_a,
@@ -133,6 +142,7 @@ def compute_dice_similarity(
         n_bits=n_bits,
         invalid_fallback_penalty=invalid_fallback_penalty,
         invalid_similarity_ngram_size=invalid_similarity_ngram_size,
+        enable_invalid_similarity_ngram_fallback=enable_invalid_similarity_ngram_fallback,
     )
 
 
@@ -146,6 +156,9 @@ def compute_tanimoto_similarity(
     n_bits: int = DEFAULT_FINGERPRINT_NUM_BITS,
     invalid_fallback_penalty: float = DEFAULT_PENALTY_INVALID,
     invalid_similarity_ngram_size: int = DEFAULT_INVALID_SIMILARITY_NGRAM_SIZE,
+    enable_invalid_similarity_ngram_fallback: bool = (
+        DEFAULT_ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK
+    ),
 ) -> float:
     return _safe_similarity(
         molecule_a,
@@ -157,6 +170,7 @@ def compute_tanimoto_similarity(
         n_bits=n_bits,
         invalid_fallback_penalty=invalid_fallback_penalty,
         invalid_similarity_ngram_size=invalid_similarity_ngram_size,
+        enable_invalid_similarity_ngram_fallback=enable_invalid_similarity_ngram_fallback,
     )
 
 
