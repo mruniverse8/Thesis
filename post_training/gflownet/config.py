@@ -28,10 +28,10 @@ class GFlowNetRolloutConfig:
 
 @dataclass(frozen=True)
 class ReplayConfig:
-    enabled: bool = True
+    enabled: bool = False
     buffer_type: str = "experimental_mixture"
     capacity: int = 256
-    replay_fraction: float | None = 0.25
+    replay_fraction: float | None = 0.75
     replay_batch_size: int = 0
     max_total_action_tokens: int = 50_000
     with_replacement: bool = False
@@ -44,6 +44,33 @@ class ReplayConfig:
     recent_window_size: int = 64
     max_invalid_fraction: float = 0.20
     max_duplicate_fraction: float = 0.10
+
+
+@dataclass(frozen=True)
+class TargetGuidanceConfig:
+    enabled: bool = True
+    on_policy_fraction: float = 0.25
+    target_prefix_rollout_fraction: float = 0.50
+    target_teacher_fraction: float = 0.25
+    teacher_stage_strategy: str = "random"
+    prefix_stage_strategy: str = "random"
+    shuffle_target_selfies_list: bool = False
+
+    def __post_init__(self) -> None:
+        fractions = (
+            float(self.on_policy_fraction),
+            float(self.target_prefix_rollout_fraction),
+            float(self.target_teacher_fraction),
+        )
+        if any(value < 0.0 for value in fractions):
+            raise ValueError("target_guidance fractions must be non-negative.")
+        if bool(self.enabled) and abs(sum(fractions) - 1.0) > 1.0e-6:
+            raise ValueError("enabled target_guidance fractions must sum to 1.0.")
+        valid_strategies = {"random"}
+        if str(self.teacher_stage_strategy).strip().lower() not in valid_strategies:
+            raise ValueError("target_guidance.teacher_stage_strategy must be: random.")
+        if str(self.prefix_stage_strategy).strip().lower() not in valid_strategies:
+            raise ValueError("target_guidance.prefix_stage_strategy must be: random.")
 
 
 @dataclass(frozen=True)
@@ -68,11 +95,13 @@ class GFlowNetConfig:
     target_modules: tuple[str, ...] = ("q", "v")
     rollout: GFlowNetRolloutConfig = field(default_factory=GFlowNetRolloutConfig)
     replay: ReplayConfig = field(default_factory=ReplayConfig)
+    target_guidance: TargetGuidanceConfig = field(default_factory=TargetGuidanceConfig)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "GFlowNetConfig":
         rollout_payload = dict(payload.get("rollout", {}))
         replay_payload = dict(payload.get("replay", {}))
+        target_guidance_payload = dict(payload.get("target_guidance", {}))
         target_modules = tuple(payload.get("target_modules", ("q", "v")))
         objective = str(payload.get("objective", cls.objective)).strip().lower()
         if objective not in {"tb", "db", "subtb"}:
@@ -400,6 +429,50 @@ class GFlowNetConfig:
                         ),
                         1.0,
                     ),
+                ),
+            ),
+            target_guidance=TargetGuidanceConfig(
+                enabled=bool(
+                    target_guidance_payload.get(
+                        "enabled",
+                        TargetGuidanceConfig.enabled,
+                    )
+                ),
+                on_policy_fraction=float(
+                    target_guidance_payload.get(
+                        "on_policy_fraction",
+                        TargetGuidanceConfig.on_policy_fraction,
+                    )
+                ),
+                target_prefix_rollout_fraction=float(
+                    target_guidance_payload.get(
+                        "target_prefix_rollout_fraction",
+                        TargetGuidanceConfig.target_prefix_rollout_fraction,
+                    )
+                ),
+                target_teacher_fraction=float(
+                    target_guidance_payload.get(
+                        "target_teacher_fraction",
+                        TargetGuidanceConfig.target_teacher_fraction,
+                    )
+                ),
+                teacher_stage_strategy=str(
+                    target_guidance_payload.get(
+                        "teacher_stage_strategy",
+                        TargetGuidanceConfig.teacher_stage_strategy,
+                    )
+                ).strip().lower(),
+                prefix_stage_strategy=str(
+                    target_guidance_payload.get(
+                        "prefix_stage_strategy",
+                        TargetGuidanceConfig.prefix_stage_strategy,
+                    )
+                ).strip().lower(),
+                shuffle_target_selfies_list=bool(
+                    target_guidance_payload.get(
+                        "shuffle_target_selfies_list",
+                        TargetGuidanceConfig.shuffle_target_selfies_list,
+                    )
                 ),
             ),
         )

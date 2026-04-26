@@ -8,10 +8,14 @@ import torch
 
 from src.constants import EOM_TOKEN
 
-from post_training.gflownet.config import GFlowNetConfig, ReplayConfig
+from post_training.gflownet.config import GFlowNetConfig, ReplayConfig, TargetGuidanceConfig
 from post_training.gflownet.diagnostics import GFlowNetTrainIterationResult
 from post_training.gflownet.trajectory import SampledStageTrajectory, ScoredStageTrajectory
-from post_training.gflownet.trainer import MultiMoleculeGFlowNetTrainer, run_multi_molecule_gflownet
+from post_training.gflownet.trainer import (
+    MultiMoleculeGFlowNetTrainer,
+    _compute_replay_target_count,
+    run_multi_molecule_gflownet,
+)
 from post_training.shared.decoding import StageTokenConstraints
 from post_training.shared.config import DEFAULT_PPO_FALLBACK_CHECKPOINT, resolve_gflownet_config_paths
 
@@ -25,6 +29,7 @@ def _make_sampled_trajectory(
     target_selfies_list: tuple[str, ...] = ("[C][C][O]",),
     termination_reason: str = "stop_token",
     is_valid: bool = True,
+    metadata_source: str | None = None,
 ) -> SampledStageTrajectory:
     return SampledStageTrajectory(
         rollout_id=rollout_id,
@@ -45,7 +50,20 @@ def _make_sampled_trajectory(
         termination_reason=termination_reason,
         is_valid=is_valid,
         is_duplicate=False,
+        metadata=(
+            {"trajectory_source": metadata_source}
+            if metadata_source is not None
+            else {}
+        ),
     )
+
+
+def test_replay_fraction_converts_to_replay_dominant_target_count() -> None:
+    assert _compute_replay_target_count(
+        on_policy_count=4,
+        replay_fraction=0.75,
+        legacy_replay_batch_size=0,
+    ) == 12
 
 
 @pytest.mark.parametrize(
@@ -97,7 +115,7 @@ def test_collect_on_policy_trajectories_passes_last_valid_only_flag_for_subtb(
     assert calls == [expected_return_last_valid_trajectory_only]
 
 
-def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
+def test_train_iteration_mixes_on_policy_and_target_guided_sources(monkeypatch) -> None:
     class DummyModel(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -123,9 +141,16 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
             trajectory_preview_every_iterations=1,
             trajectory_preview_num_samples=3,
             replay=ReplayConfig(
-                capacity=8,
-                replay_fraction=0.2,
+                enabled=True,
+                capacity=32,
+                replay_fraction=0.75,
                 max_total_action_tokens=32,
+            ),
+            target_guidance=TargetGuidanceConfig(
+                enabled=True,
+                on_policy_fraction=0.25,
+                target_prefix_rollout_fraction=0.50,
+                target_teacher_fraction=0.25,
             ),
         ),
         device=torch.device("cpu"),
@@ -153,13 +178,51 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
         ),
         _make_sampled_trajectory(rollout_id="fresh-3", terminal_reward=4.0),
     ]
-    replay_item = _make_sampled_trajectory(rollout_id="replay-1", terminal_reward=1.5)
-    trainer.replay_buffer.add(replay_item)
+    assert trainer.replay_buffer is None
 
     monkeypatch.setattr(
         trainer,
         "collect_on_policy_trajectories",
         lambda _examples, iteration_index: on_policy,
+    )
+    target_prefix_items = [
+        _make_sampled_trajectory(
+            rollout_id=f"target-prefix-{index}",
+            terminal_reward=5.0,
+            metadata_source="target_prefix_rollout",
+        )
+        for index in range(8)
+    ]
+    target_teacher_items = [
+        _make_sampled_trajectory(
+            rollout_id=f"target-teacher-{index}",
+            terminal_reward=6.0,
+            metadata_source="target_teacher",
+        )
+        for index in range(4)
+    ]
+    prefix_calls: list[int] = []
+    teacher_calls: list[int] = []
+
+    def fake_collect_target_prefix(_examples, *, iteration_index, count):
+        del iteration_index
+        prefix_calls.append(int(count))
+        return target_prefix_items[:count]
+
+    def fake_collect_target_teacher(_examples, *, iteration_index, count):
+        del iteration_index
+        teacher_calls.append(int(count))
+        return target_teacher_items[:count]
+
+    monkeypatch.setattr(
+        trainer,
+        "collect_target_prefix_trajectories",
+        fake_collect_target_prefix,
+    )
+    monkeypatch.setattr(
+        trainer,
+        "collect_target_teacher_trajectories",
+        fake_collect_target_teacher,
     )
 
     def fake_score(trajectories):
@@ -191,19 +254,34 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     metrics = result.metrics
 
     assert metrics["num_on_policy_trajectories"] == 4.0
-    assert metrics["num_replay_trajectories"] == 1.0
-    assert metrics["configured_replay_fraction"] == pytest.approx(0.2)
-    assert metrics["replay_fraction"] == pytest.approx(0.2)
-    assert metrics["replay_buffer_type"] == "experimental_mixture"
+    assert metrics["num_target_prefix_trajectories"] == 8.0
+    assert metrics["num_target_teacher_trajectories"] == 4.0
+    assert metrics["num_target_guided_trajectories"] == 12.0
+    assert prefix_calls == [8]
+    assert teacher_calls == [4]
+    assert metrics["target_guidance_on_policy_fraction"] == pytest.approx(0.25)
+    assert metrics["target_guidance_prefix_fraction"] == pytest.approx(0.50)
+    assert metrics["target_guidance_teacher_fraction"] == pytest.approx(0.25)
+    assert metrics["target_prefix_valid_fraction"] == pytest.approx(1.0)
+    assert metrics["target_teacher_valid_fraction"] == pytest.approx(1.0)
+    assert metrics["target_prefix_mean_stage_reward"] == pytest.approx(5.0)
+    assert metrics["target_teacher_mean_stage_reward"] == pytest.approx(6.0)
+    assert metrics["num_replay_trajectories"] == 0.0
+    assert metrics["configured_replay_fraction"] == pytest.approx(0.0)
+    assert metrics["replay_fraction"] == pytest.approx(0.0)
+    assert metrics["replay_buffer_type"] == "disabled"
     assert metrics["replay_recent_count"] == pytest.approx(0.0)
     assert metrics["replay_reward_count"] == pytest.approx(0.0)
-    assert metrics["replay_uniform_count"] == pytest.approx(1.0)
+    assert metrics["replay_uniform_count"] == pytest.approx(0.0)
     assert metrics["replay_tb_residual_count"] == pytest.approx(0.0)
-    assert metrics["replay_size"] == 5.0
-    assert metrics["replay_total_action_tokens"] == 12.0
+    assert metrics["replay_size"] == 0.0
+    assert metrics["replay_total_action_tokens"] == 0.0
     assert metrics["rollout_append_probability"] == pytest.approx(0.30)
     assert metrics["rollout_return_last_valid_trajectory_only"] == pytest.approx(0.0)
     assert metrics["mean_stage_reward"] == pytest.approx((2.0 + 3.0 + 1.0e-4 + 4.0) / 4.0)
+    assert metrics["mean_training_stage_reward"] == pytest.approx(
+        (2.0 + 3.0 + 1.0e-4 + 4.0 + 8 * 5.0 + 4 * 6.0) / 16.0
+    )
     assert metrics["valid_fraction"] == pytest.approx(0.75)
     assert metrics["mean_num_actions"] == pytest.approx(2.5)
     assert metrics["max_num_actions"] == pytest.approx(4.0)
@@ -233,6 +311,7 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
     assert "objective_loss" in metrics
     assert "grad_norm" in metrics
     assert "sampling_duration_sec" in metrics
+    assert "target_guidance_sampling_duration_sec" in metrics
     assert "action_tokens_per_sec" in metrics
     assert "mean_log_pf_token" in metrics
     assert result.diagnostic_metrics is not None
@@ -248,6 +327,102 @@ def test_train_iteration_mixes_on_policy_and_replay(monkeypatch) -> None:
         "median",
         "worst",
     }
+
+
+def test_train_iteration_proceeds_with_target_teacher_when_on_policy_is_empty(
+    monkeypatch,
+) -> None:
+    class DummyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+            self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+
+        def to(self, device):
+            return super().to(device)
+
+        def save_checkpoint(self, *args, **kwargs):
+            del args, kwargs
+            return None
+
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=DummyModel(),
+        tokenizer=None,
+        config=GFlowNetConfig(
+            objective="db",
+            save_every_iterations=99,
+            diagnostic_log_every_iterations=1,
+            trajectory_preview_every_iterations=99,
+            replay=ReplayConfig(enabled=False),
+            target_guidance=TargetGuidanceConfig(
+                enabled=True,
+                on_policy_fraction=0.25,
+                target_prefix_rollout_fraction=0.50,
+                target_teacher_fraction=0.25,
+            ),
+        ),
+        device=torch.device("cpu"),
+    )
+    teacher = [_make_sampled_trajectory(rollout_id="teacher-1", terminal_reward=6.0)]
+    prefix_counts: list[int] = []
+    teacher_counts: list[int] = []
+
+    monkeypatch.setattr(
+        trainer,
+        "collect_on_policy_trajectories",
+        lambda _examples, iteration_index: [],
+    )
+
+    def fake_collect_target_prefix(_examples, *, iteration_index, count):
+        del iteration_index
+        prefix_counts.append(int(count))
+        return []
+
+    def fake_collect_target_teacher(_examples, *, iteration_index, count):
+        del iteration_index
+        teacher_counts.append(int(count))
+        return teacher[:1]
+
+    monkeypatch.setattr(
+        trainer,
+        "collect_target_prefix_trajectories",
+        fake_collect_target_prefix,
+    )
+    monkeypatch.setattr(
+        trainer,
+        "collect_target_teacher_trajectories",
+        fake_collect_target_teacher,
+    )
+
+    def fake_score(trajectories):
+        base = trainer.model.weight
+        return [
+            ScoredStageTrajectory(
+                sampled=trajectory,
+                log_pf_tokens=tuple(base * 0.1 for _ in trajectory.action_token_ids),
+                log_stop=tuple(base * -0.2 for _ in range(len(trajectory.action_token_ids) + 1)),
+                log_state_flows=tuple(
+                    base * 0.3 for _ in range(len(trajectory.action_token_ids) + 1)
+                ),
+            )
+            for trajectory in trajectories
+        ]
+
+    monkeypatch.setattr(trainer, "score_trajectories", fake_score)
+    monkeypatch.setattr(trainer, "save_best_checkpoint", lambda **kwargs: None)
+
+    result = trainer.train_iteration([{"id": "example-1"}], iteration_index=1)
+
+    assert prefix_counts == [2]
+    assert teacher_counts == [1]
+    assert result.metrics["num_on_policy_trajectories"] == 0.0
+    assert result.metrics["num_target_prefix_trajectories"] == 0.0
+    assert result.metrics["num_target_teacher_trajectories"] == 1.0
+    assert result.metrics["num_target_guided_trajectories"] == 1.0
+    assert result.metrics["mean_stage_reward"] == pytest.approx(0.0)
+    assert result.metrics["target_teacher_mean_stage_reward"] == pytest.approx(6.0)
+    assert result.metrics["all_finite"] is True
+    assert "objective_loss" in result.metrics
 
 
 def test_save_best_checkpoint_tracks_lowest_objective_loss_and_writes_zip(

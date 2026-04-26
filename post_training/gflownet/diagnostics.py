@@ -26,6 +26,16 @@ GFLOWNET_TRACKER_HEADLINE_METRIC_KEYS = frozenset(
         "max_num_actions",
         "mean_stage_index",
         "num_on_policy_trajectories",
+        "num_target_prefix_trajectories",
+        "num_target_teacher_trajectories",
+        "num_target_guided_trajectories",
+        "target_guidance_on_policy_fraction",
+        "target_guidance_prefix_fraction",
+        "target_guidance_teacher_fraction",
+        "target_prefix_valid_fraction",
+        "target_teacher_valid_fraction",
+        "target_prefix_mean_stage_reward",
+        "target_teacher_mean_stage_reward",
         "num_replay_trajectories",
         "configured_replay_fraction",
         "replay_fraction",
@@ -358,6 +368,10 @@ def build_trajectory_preview_payload(
                     sum(float(trajectory.terminal_reward) for trajectory in ordered_rollout)
                 ),
                 "stage_indices": [int(trajectory.stage_index) for trajectory in ordered_rollout],
+                "trajectory_source_sequence": [
+                    trajectory.metadata.get("trajectory_source", "on_policy")
+                    for trajectory in ordered_rollout
+                ],
                 "stage_rewards": [
                     float(trajectory.terminal_reward) for trajectory in ordered_rollout
                 ],
@@ -455,6 +469,13 @@ def build_trajectory_preview_payload(
                         "generated_selfies="
                         + _render_sequence(
                             record["generated_selfies_sequence"],
+                            max_chars=max_chars,
+                        )
+                    ),
+                    (
+                        "trajectory_source="
+                        + _render_sequence(
+                            record["trajectory_source_sequence"],
                             max_chars=max_chars,
                         )
                     ),

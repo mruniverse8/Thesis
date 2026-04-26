@@ -15,7 +15,11 @@ from post_training.shared.decoding import (
     mask_logits_to_allowed_token_ids,
     resolve_stage_token_constraints,
 )
-from post_training.shared.sequence import build_stage_prefix, project_sampled_stage_to_no_h
+from post_training.shared.sequence import (
+    build_stage_prefix,
+    project_sampled_stage_to_no_h,
+    serialize_staged_molecule,
+)
 from molecules.selfies import decode_biot5_selfies
 
 from .config import GFlowNetRolloutConfig
@@ -210,6 +214,204 @@ def build_sampled_stage_trajectory_from_generation(
             "num_actions": len(action_token_ids),
             "stop_action_token": EOM_TOKEN,
         },
+    )
+
+
+def _target_selfies_list_for_guidance(
+    example: dict[str, Any],
+    *,
+    max_molecules_per_sequence: int,
+    rng: random.Random | None = None,
+    shuffle_target_selfies_list: bool = False,
+) -> tuple[str, ...]:
+    target_selfies_list = tuple(str(item) for item in example["target_selfies_list"])
+    max_stage_count = max(1, int(max_molecules_per_sequence))
+    target_selfies_list = target_selfies_list[:max_stage_count]
+    if not target_selfies_list:
+        raise ValueError("Target-guided rollout requires at least one target SELFIES.")
+    if shuffle_target_selfies_list and len(target_selfies_list) > 1:
+        shuffled_target_selfies_list = list(target_selfies_list)
+        generator = rng or random
+        generator.shuffle(shuffled_target_selfies_list)
+        target_selfies_list = tuple(shuffled_target_selfies_list)
+    return target_selfies_list
+
+
+def _example_with_target_selfies_list(
+    example: dict[str, Any],
+    target_selfies_list: Sequence[str],
+) -> dict[str, Any]:
+    guided_example = dict(example)
+    guided_example["target_selfies_list"] = tuple(str(item) for item in target_selfies_list)
+    return guided_example
+
+
+def _select_target_guided_stage_index(
+    target_selfies_list: Sequence[str],
+    *,
+    rng: random.Random | None,
+    stage_strategy: str,
+) -> int:
+    normalized_strategy = str(stage_strategy).strip().lower()
+    if normalized_strategy != "random":
+        raise ValueError("Target-guided stage strategy must be: random.")
+    generator = rng or random
+    return int(generator.randrange(len(target_selfies_list))) + 1
+
+
+def _encode_staged_molecule_action_ids(
+    tokenizer: PreTrainedTokenizerBase,
+    stage_text: str,
+) -> tuple[int, ...]:
+    encoded = tokenizer(
+        stage_text,
+        add_special_tokens=False,
+        return_attention_mask=False,
+    )
+    input_ids = encoded["input_ids"]
+    if isinstance(input_ids, torch.Tensor):
+        if input_ids.ndim == 2:
+            token_ids = [int(token_id) for token_id in input_ids[0].tolist()]
+        else:
+            token_ids = [int(token_id) for token_id in input_ids.reshape(-1).tolist()]
+    elif input_ids and isinstance(input_ids[0], list):
+        token_ids = [int(token_id) for token_id in input_ids[0]]
+    else:
+        token_ids = [int(token_id) for token_id in input_ids]
+
+    eom_token_id = int(tokenizer.convert_tokens_to_ids(EOM_TOKEN))
+    if not token_ids or int(token_ids[-1]) != eom_token_id:
+        raise ValueError("Teacher-forced stage text did not tokenize with terminal <eom>.")
+    return tuple(token_ids[:-1])
+
+
+def sample_target_prefix_stage_trajectory_for_example(
+    model: GFlowNetModel,
+    tokenizer: PreTrainedTokenizerBase,
+    example: dict[str, Any],
+    *,
+    rollout_id: str,
+    generation_config: GFlowNetRolloutConfig,
+    reward_config: RewardConfig | None = None,
+    invalid_terminal_reward: float = 1.0e-4,
+    device: torch.device,
+    stage_token_constraints: StageTokenConstraints | None = None,
+    rng: random.Random | None = None,
+    stage_strategy: str = "random",
+    shuffle_target_selfies_list: bool = False,
+) -> SampledStageTrajectory:
+    target_selfies_list = _target_selfies_list_for_guidance(
+        example,
+        max_molecules_per_sequence=generation_config.max_molecules_per_sequence,
+        rng=rng,
+        shuffle_target_selfies_list=shuffle_target_selfies_list,
+    )
+    guided_example = _example_with_target_selfies_list(example, target_selfies_list)
+    stage_index = _select_target_guided_stage_index(
+        target_selfies_list,
+        rng=rng,
+        stage_strategy=stage_strategy,
+    )
+    previous_sampled_selfies = target_selfies_list[: stage_index - 1]
+    prefix_text = build_stage_prefix(
+        previous_sampled_selfies,
+        separator_token=generation_config.stage_separator,
+    )
+    prompt_inputs = encode_prompt(
+        tokenizer,
+        str(example["prompt"]),
+        max_source_length=generation_config.max_source_length,
+        device=device,
+    )
+    decoder_start_token_id = int(model.policy_model.config.decoder_start_token_id)
+    decoder_prefix_ids = encode_decoder_prefix(
+        tokenizer,
+        prefix_text,
+        decoder_start_token_id=decoder_start_token_id,
+        device=device,
+    )
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=prompt_inputs["input_ids"],
+        attention_mask=prompt_inputs["attention_mask"],
+        decoder_prefix_ids=decoder_prefix_ids,
+        generation_config=generation_config,
+        stage_token_constraints=stage_token_constraints,
+    )
+    metadata = {
+        **dict(stage_sample.get("metadata", {})),
+        "trajectory_source": "target_prefix_rollout",
+        "target_guided_stage_index": stage_index,
+    }
+    return build_sampled_stage_trajectory_from_generation(
+        example=guided_example,
+        rollout_id=rollout_id,
+        stage_index=stage_index,
+        decoder_prefix_text=prefix_text,
+        previous_sampled_selfies=previous_sampled_selfies,
+        stage_text=str(stage_sample["stage_text"]),
+        sampled_selfies=stage_sample["sampled_selfies"],
+        action_token_ids=stage_sample["action_token_ids"],
+        metadata=metadata,
+        stop_token=stage_sample["stop_token"],
+        termination_reason=stage_sample["termination_reason"],
+        reward_config=reward_config,
+        invalid_terminal_reward=invalid_terminal_reward,
+    )
+
+
+def build_target_teacher_stage_trajectory_for_example(
+    tokenizer: PreTrainedTokenizerBase,
+    example: dict[str, Any],
+    *,
+    rollout_id: str,
+    generation_config: GFlowNetRolloutConfig,
+    reward_config: RewardConfig | None = None,
+    invalid_terminal_reward: float = 1.0e-4,
+    rng: random.Random | None = None,
+    stage_strategy: str = "random",
+    shuffle_target_selfies_list: bool = False,
+) -> SampledStageTrajectory:
+    target_selfies_list = _target_selfies_list_for_guidance(
+        example,
+        max_molecules_per_sequence=generation_config.max_molecules_per_sequence,
+        rng=rng,
+        shuffle_target_selfies_list=shuffle_target_selfies_list,
+    )
+    guided_example = _example_with_target_selfies_list(example, target_selfies_list)
+    stage_index = _select_target_guided_stage_index(
+        target_selfies_list,
+        rng=rng,
+        stage_strategy=stage_strategy,
+    )
+    previous_sampled_selfies = target_selfies_list[: stage_index - 1]
+    target_selfies = target_selfies_list[stage_index - 1]
+    prefix_text = build_stage_prefix(
+        previous_sampled_selfies,
+        separator_token=generation_config.stage_separator,
+    )
+    stage_text = serialize_staged_molecule(target_selfies)
+    action_token_ids = _encode_staged_molecule_action_ids(tokenizer, stage_text)
+    return build_sampled_stage_trajectory_from_generation(
+        example=guided_example,
+        rollout_id=rollout_id,
+        stage_index=stage_index,
+        decoder_prefix_text=prefix_text,
+        previous_sampled_selfies=previous_sampled_selfies,
+        stage_text=stage_text,
+        sampled_selfies=target_selfies,
+        action_token_ids=action_token_ids,
+        metadata={
+            "raw_stage_text": stage_text,
+            "raw_sampled_selfies": target_selfies,
+            "trajectory_source": "target_teacher",
+            "target_guided_stage_index": stage_index,
+        },
+        stop_token=EOM_TOKEN,
+        termination_reason="stop_token",
+        reward_config=reward_config,
+        invalid_terminal_reward=invalid_terminal_reward,
     )
 
 

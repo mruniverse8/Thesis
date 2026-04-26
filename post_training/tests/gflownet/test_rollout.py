@@ -11,8 +11,10 @@ from src.constants import EOM_TOKEN
 from post_training.gflownet.config import GFlowNetRolloutConfig
 from post_training.gflownet.rollout import (
     build_sampled_stage_trajectory_from_generation,
+    build_target_teacher_stage_trajectory_for_example,
     sample_stage,
     sample_stage_trajectories_for_example,
+    sample_target_prefix_stage_trajectory_for_example,
 )
 from post_training.shared.decoding import StageTokenConstraints
 from post_training.shared.sequence import build_stage_prefix
@@ -73,6 +75,22 @@ class FixedRandom:
         if not self._values:
             raise AssertionError("No more RNG values were available.")
         return float(self._values.pop(0))
+
+
+class FixedRandrange:
+    def __init__(self, values: list[int]) -> None:
+        self._values = list(values)
+
+    def randrange(self, upper_bound: int) -> int:
+        del upper_bound
+        if not self._values:
+            raise AssertionError("No more RNG values were available.")
+        return int(self._values.pop(0))
+
+
+class ReverseShuffleRandrange(FixedRandrange):
+    def shuffle(self, values: list[str]) -> None:
+        values.reverse()
 
 
 class PrefixLogitPolicyModel:
@@ -181,6 +199,242 @@ def test_build_sampled_stage_trajectory_uses_cleanup_text_for_invalid_reward_fal
     assert trajectory.metadata["invalid_candidate_text_source"] == "cleanup_selected_selfies"
     assert trajectory.reward_breakdown["match_reward"] > 0.0
     assert trajectory.terminal_reward > 5.0e-5
+
+
+def test_sample_target_prefix_stage_trajectory_uses_target_prefix_and_model_sample(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: " ",
+            5: "[C][C][N]",
+        },
+        {
+            "<bom>": 1,
+            "[C][C][O]": 2,
+            EOM_TOKEN: 3,
+            " ": 4,
+            "[C][C][N]": 5,
+        },
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    observed_prefix_lengths: list[int] = []
+
+    def fake_sample_stage(*args, **kwargs):
+        del args
+        observed_prefix_lengths.append(int(kwargs["decoder_prefix_ids"].size(1)))
+        return {
+            "stage_text": "<bom>[C][C][N]<eom>",
+            "sampled_selfies": "[C][C][N]",
+            "action_token_ids": (1, 5),
+            "metadata": {"raw_stage_text": "<bom>[C][C][N]<eom>"},
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+        }
+
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage", fake_sample_stage)
+
+    trajectory = sample_target_prefix_stage_trajectory_for_example(
+        DummyModel(),
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="target-prefix-1",
+        generation_config=GFlowNetRolloutConfig(max_molecules_per_sequence=8),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandrange([1]),
+    )
+
+    assert trajectory.stage_index == 2
+    assert trajectory.decoder_prefix_text == build_stage_prefix(["[C][C][O]"])
+    assert trajectory.previous_sampled_selfies == ("[C][C][O]",)
+    assert trajectory.sampled_selfies == "[C][C][N]"
+    assert trajectory.action_token_ids == (1, 5)
+    assert trajectory.metadata["trajectory_source"] == "target_prefix_rollout"
+    assert trajectory.metadata["target_guided_stage_index"] == 2
+    assert observed_prefix_lengths == [5]
+
+
+def test_build_target_teacher_stage_trajectory_for_example_forces_target_stage() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: " ",
+            5: "[C][C][N]",
+        },
+        {
+            "<bom>": 1,
+            "[C][C][O]": 2,
+            EOM_TOKEN: 3,
+            " ": 4,
+            "[C][C][N]": 5,
+        },
+    )
+
+    trajectory = build_target_teacher_stage_trajectory_for_example(
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="target-teacher-1",
+        generation_config=GFlowNetRolloutConfig(max_molecules_per_sequence=8),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        rng=FixedRandrange([1]),
+    )
+
+    assert trajectory.stage_index == 2
+    assert trajectory.decoder_prefix_text == build_stage_prefix(["[C][C][O]"])
+    assert trajectory.previous_sampled_selfies == ("[C][C][O]",)
+    assert trajectory.stage_text == "<bom>[C][C][N]<eom>"
+    assert trajectory.sampled_selfies == "[C][C][N]"
+    assert trajectory.action_token_ids == (1, 5)
+    assert trajectory.prefix_rewards[-1] == pytest.approx(trajectory.terminal_reward)
+    assert len(trajectory.prefix_rewards) == len(trajectory.action_token_ids) + 1
+    assert trajectory.stop_token == EOM_TOKEN
+    assert trajectory.metadata["trajectory_source"] == "target_teacher"
+    assert trajectory.metadata["target_guided_stage_index"] == 2
+
+
+def test_sample_target_prefix_stage_trajectory_can_shuffle_guided_targets(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: " ",
+            5: "[C][C][N]",
+            6: "[C][O][O]",
+        },
+        {
+            "<bom>": 1,
+            "[C][C][O]": 2,
+            EOM_TOKEN: 3,
+            " ": 4,
+            "[C][C][N]": 5,
+            "[C][O][O]": 6,
+        },
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    def fake_sample_stage(*args, **kwargs):
+        del args, kwargs
+        return {
+            "stage_text": "<bom>[C][C][N]<eom>",
+            "sampled_selfies": "[C][C][N]",
+            "action_token_ids": (1, 5),
+            "metadata": {"raw_stage_text": "<bom>[C][C][N]<eom>"},
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+        }
+
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage", fake_sample_stage)
+    example = {
+        "id": "example-1",
+        "prompt": "prompt",
+        "description": "description",
+        "target_selfies_list": ["[C][C][O]", "[C][C][N]", "[C][O][O]"],
+    }
+
+    trajectory = sample_target_prefix_stage_trajectory_for_example(
+        DummyModel(),
+        tokenizer,
+        example,
+        rollout_id="target-prefix-1",
+        generation_config=GFlowNetRolloutConfig(max_molecules_per_sequence=8),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=ReverseShuffleRandrange([1]),
+        shuffle_target_selfies_list=True,
+    )
+
+    assert example["target_selfies_list"] == ["[C][C][O]", "[C][C][N]", "[C][O][O]"]
+    assert trajectory.target_selfies_list == ("[C][O][O]", "[C][C][N]", "[C][C][O]")
+    assert trajectory.stage_index == 2
+    assert trajectory.decoder_prefix_text == build_stage_prefix(["[C][O][O]"])
+    assert trajectory.previous_sampled_selfies == ("[C][O][O]",)
+    assert trajectory.metadata["trajectory_source"] == "target_prefix_rollout"
+    assert trajectory.metadata["target_guided_stage_index"] == 2
+
+
+def test_build_target_teacher_stage_trajectory_can_shuffle_guided_targets() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: " ",
+            5: "[C][C][N]",
+            6: "[C][O][O]",
+        },
+        {
+            "<bom>": 1,
+            "[C][C][O]": 2,
+            EOM_TOKEN: 3,
+            " ": 4,
+            "[C][C][N]": 5,
+            "[C][O][O]": 6,
+        },
+    )
+    example = {
+        "id": "example-1",
+        "prompt": "prompt",
+        "description": "description",
+        "target_selfies_list": ["[C][C][O]", "[C][C][N]", "[C][O][O]"],
+    }
+
+    trajectory = build_target_teacher_stage_trajectory_for_example(
+        tokenizer,
+        example,
+        rollout_id="target-teacher-1",
+        generation_config=GFlowNetRolloutConfig(max_molecules_per_sequence=8),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        rng=ReverseShuffleRandrange([1]),
+        shuffle_target_selfies_list=True,
+    )
+
+    assert example["target_selfies_list"] == ["[C][C][O]", "[C][C][N]", "[C][O][O]"]
+    assert trajectory.target_selfies_list == ("[C][O][O]", "[C][C][N]", "[C][C][O]")
+    assert trajectory.stage_index == 2
+    assert trajectory.decoder_prefix_text == build_stage_prefix(["[C][O][O]"])
+    assert trajectory.previous_sampled_selfies == ("[C][O][O]",)
+    assert trajectory.stage_text == "<bom>[C][C][N]<eom>"
+    assert trajectory.sampled_selfies == "[C][C][N]"
+    assert trajectory.metadata["trajectory_source"] == "target_teacher"
+    assert trajectory.metadata["target_guided_stage_index"] == 2
 
 
 def test_sample_stage_trajectories_for_example_updates_prefix_after_sampled_stage(monkeypatch) -> None:

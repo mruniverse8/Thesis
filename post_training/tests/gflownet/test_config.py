@@ -1,6 +1,12 @@
 from pathlib import Path
 
-from post_training.gflownet.config import GFlowNetConfig, build_gflownet_config
+import pytest
+
+from post_training.gflownet.config import (
+    GFlowNetConfig,
+    TargetGuidanceConfig,
+    build_gflownet_config,
+)
 from post_training.shared.config import (
     DEFAULT_PPO_FALLBACK_CHECKPOINT,
     resolve_gflownet_config_paths,
@@ -39,6 +45,15 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
                 "max_invalid_fraction": 0.35,
                 "max_duplicate_fraction": 0.15,
             },
+            "target_guidance": {
+                "enabled": True,
+                "on_policy_fraction": 0.30,
+                "target_prefix_rollout_fraction": 0.50,
+                "target_teacher_fraction": 0.20,
+                "teacher_stage_strategy": "random",
+                "prefix_stage_strategy": "random",
+                "shuffle_target_selfies_list": True,
+            },
         }
     )
 
@@ -68,6 +83,28 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.replay.recent_window_size == 16
     assert config.replay.max_invalid_fraction == 0.35
     assert config.replay.max_duplicate_fraction == 0.15
+    assert config.target_guidance.enabled is True
+    assert config.target_guidance.on_policy_fraction == 0.30
+    assert config.target_guidance.target_prefix_rollout_fraction == 0.50
+    assert config.target_guidance.target_teacher_fraction == 0.20
+    assert config.target_guidance.teacher_stage_strategy == "random"
+    assert config.target_guidance.prefix_stage_strategy == "random"
+    assert config.target_guidance.shuffle_target_selfies_list is True
+    assert config.to_dict()["target_guidance"]["shuffle_target_selfies_list"] is True
+
+
+def test_target_guidance_config_rejects_invalid_fraction_sum() -> None:
+    with pytest.raises(ValueError, match="sum to 1.0"):
+        TargetGuidanceConfig(
+            on_policy_fraction=0.25,
+            target_prefix_rollout_fraction=0.25,
+            target_teacher_fraction=0.25,
+        )
+
+
+def test_target_guidance_config_rejects_invalid_stage_strategy() -> None:
+    with pytest.raises(ValueError, match="teacher_stage_strategy"):
+        TargetGuidanceConfig(teacher_stage_strategy="last")
 
 
 def test_gflownet_config_from_dict_keeps_legacy_replay_batch_size_when_fraction_is_absent() -> None:
@@ -125,9 +162,14 @@ def test_gflownet_rollout_defaults_enable_constrained_decoding_and_tighter_sampl
     assert config.rollout.invalid_append_probability == 0.0
     assert config.rollout.terminate_on_invalid_stage is True
     assert config.rollout.selfies_dict_path == "molecules/dict/selfies_dict.txt"
-    assert config.replay.enabled is True
+    assert config.replay.enabled is False
     assert config.replay.buffer_type == "experimental_mixture"
-    assert config.replay.replay_fraction == 0.25
+    assert config.replay.replay_fraction == 0.75
+    assert config.target_guidance.enabled is True
+    assert config.target_guidance.on_policy_fraction == 0.25
+    assert config.target_guidance.target_prefix_rollout_fraction == 0.50
+    assert config.target_guidance.target_teacher_fraction == 0.25
+    assert config.target_guidance.shuffle_target_selfies_list is False
 
 
 def test_gflownet_config_normalizes_invalid_stage_termination_to_true() -> None:
@@ -171,6 +213,8 @@ def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
     assert config.replay.capacity == 256
     assert config.replay.max_total_action_tokens == 50_000
     assert config.replay.buffer_type == "experimental_mixture"
+    assert config.replay.enabled is False
+    assert config.target_guidance.enabled is True
 
 
 def test_multi_molecule_gflownet_mini_config_parses_for_tb_db_and_subtb() -> None:

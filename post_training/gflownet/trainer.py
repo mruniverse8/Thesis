@@ -60,7 +60,13 @@ from .losses import (
 )
 from .model import GFlowNetModel, assert_checkpoint_tokenizer_matches_model
 from .rewarding import build_reward_config
-from .rollout import encode_decoder_prefix, encode_prompt, sample_stage_trajectories_for_example
+from .rollout import (
+    build_target_teacher_stage_trajectory_for_example,
+    encode_decoder_prefix,
+    encode_prompt,
+    sample_stage_trajectories_for_example,
+    sample_target_prefix_stage_trajectory_for_example,
+)
 from .trajectory import SampledStageTrajectory, ScoredStageTrajectory
 
 
@@ -94,6 +100,22 @@ def _compute_replay_target_count(
     return max(0, int(legacy_replay_batch_size))
 
 
+def _compute_target_guided_target_count(
+    *,
+    anchor_count: int,
+    on_policy_fraction: float,
+    source_fraction: float,
+    off_policy_fraction: float,
+) -> int:
+    if anchor_count <= 0 or source_fraction <= 0.0:
+        return 0
+    if on_policy_fraction > 0.0:
+        return max(0, int(round(anchor_count * source_fraction / on_policy_fraction)))
+    if off_policy_fraction <= 0.0:
+        return 0
+    return max(0, int(round(anchor_count * source_fraction / off_policy_fraction)))
+
+
 class MultiMoleculeGFlowNetTrainer:
     def __init__(
         self,
@@ -124,6 +146,9 @@ class MultiMoleculeGFlowNetTrainer:
             trainable_parameters,
             lr=self.config.learning_rate,
         )
+        replay_enabled = bool(self.config.replay.enabled) and not bool(
+            self.config.target_guidance.enabled
+        )
         self.replay_buffer = (
             build_replay_buffer(
                 capacity=self.config.replay.capacity,
@@ -139,11 +164,12 @@ class MultiMoleculeGFlowNetTrainer:
                 max_invalid_fraction=self.config.replay.max_invalid_fraction,
                 max_duplicate_fraction=self.config.replay.max_duplicate_fraction,
             )
-            if self.config.replay.enabled and self.config.replay.capacity > 0
+            if replay_enabled and self.config.replay.capacity > 0
             else None
         )
         self.replay_rng = random.Random(0)
         self.rollout_rng = random.Random(0)
+        self.target_guidance_rng = random.Random(0)
         self.best_objective_loss: float | None = None
         self.best_checkpoint_iteration: int | None = None
         self.best_checkpoint_dir: str | None = None
@@ -171,6 +197,82 @@ class MultiMoleculeGFlowNetTrainer:
                     device=self.device,
                     rng=self.rollout_rng,
                     return_last_valid_trajectory_only=return_last_valid_trajectory_only,
+                )
+            )
+        return trajectories
+
+    def _target_guidance_example_for_sample(
+        self,
+        examples: Sequence[dict[str, object]],
+    ) -> dict[str, object]:
+        if not examples:
+            raise ValueError("Target-guided trajectory collection requires examples.")
+        return examples[self.target_guidance_rng.randrange(len(examples))]
+
+    def collect_target_prefix_trajectories(
+        self,
+        examples: Sequence[dict[str, object]],
+        *,
+        iteration_index: int,
+        count: int,
+    ) -> list[SampledStageTrajectory]:
+        if count <= 0 or not examples:
+            return []
+        trajectories: list[SampledStageTrajectory] = []
+        for sample_index in range(count):
+            example = self._target_guidance_example_for_sample(examples)
+            rollout_id = (
+                f"iter-{iteration_index:04d}-target-prefix-{sample_index:04d}-"
+                f"{example['id']}"
+            )
+            trajectories.append(
+                sample_target_prefix_stage_trajectory_for_example(
+                    self.model,
+                    self.tokenizer,
+                    example,
+                    rollout_id=rollout_id,
+                    generation_config=self.config.rollout,
+                    reward_config=self.reward_config,
+                    invalid_terminal_reward=self.config.invalid_terminal_reward,
+                    device=self.device,
+                    rng=self.target_guidance_rng,
+                    stage_strategy=self.config.target_guidance.prefix_stage_strategy,
+                    shuffle_target_selfies_list=(
+                        self.config.target_guidance.shuffle_target_selfies_list
+                    ),
+                )
+            )
+        return trajectories
+
+    def collect_target_teacher_trajectories(
+        self,
+        examples: Sequence[dict[str, object]],
+        *,
+        iteration_index: int,
+        count: int,
+    ) -> list[SampledStageTrajectory]:
+        if count <= 0 or not examples:
+            return []
+        trajectories: list[SampledStageTrajectory] = []
+        for sample_index in range(count):
+            example = self._target_guidance_example_for_sample(examples)
+            rollout_id = (
+                f"iter-{iteration_index:04d}-target-teacher-{sample_index:04d}-"
+                f"{example['id']}"
+            )
+            trajectories.append(
+                build_target_teacher_stage_trajectory_for_example(
+                    self.tokenizer,
+                    example,
+                    rollout_id=rollout_id,
+                    generation_config=self.config.rollout,
+                    reward_config=self.reward_config,
+                    invalid_terminal_reward=self.config.invalid_terminal_reward,
+                    rng=self.target_guidance_rng,
+                    stage_strategy=self.config.target_guidance.teacher_stage_strategy,
+                    shuffle_target_selfies_list=(
+                        self.config.target_guidance.shuffle_target_selfies_list
+                    ),
                 )
             )
         return trajectories
@@ -298,14 +400,108 @@ class MultiMoleculeGFlowNetTrainer:
         )
         sampling_duration_sec = perf_counter() - sampling_start
         on_policy_batch = OnPolicyBatch.from_trajectories(on_policy_trajectories)
-        if not on_policy_trajectories:
+
+        replay_sample = ReplaySampleBatch(())
+        replay_trajectories: list[SampledStageTrajectory] = []
+        target_prefix_trajectories: list[SampledStageTrajectory] = []
+        target_teacher_trajectories: list[SampledStageTrajectory] = []
+        replay_sampling_duration_sec = 0.0
+        target_guidance_sampling_duration_sec = 0.0
+
+        if self.config.target_guidance.enabled:
+            target_guidance_sampling_start = perf_counter()
+            anchor_count = max(len(on_policy_trajectories), len(examples))
+            on_policy_fraction = float(self.config.target_guidance.on_policy_fraction)
+            prefix_fraction = float(self.config.target_guidance.target_prefix_rollout_fraction)
+            teacher_fraction = float(self.config.target_guidance.target_teacher_fraction)
+            off_policy_fraction = prefix_fraction + teacher_fraction
+            target_prefix_count = _compute_target_guided_target_count(
+                anchor_count=anchor_count,
+                on_policy_fraction=on_policy_fraction,
+                source_fraction=prefix_fraction,
+                off_policy_fraction=off_policy_fraction,
+            )
+            target_teacher_count = _compute_target_guided_target_count(
+                anchor_count=anchor_count,
+                on_policy_fraction=on_policy_fraction,
+                source_fraction=teacher_fraction,
+                off_policy_fraction=off_policy_fraction,
+            )
+            target_prefix_trajectories = self.collect_target_prefix_trajectories(
+                examples,
+                iteration_index=iteration_index,
+                count=target_prefix_count,
+            )
+            target_teacher_trajectories = self.collect_target_teacher_trajectories(
+                examples,
+                iteration_index=iteration_index,
+                count=target_teacher_count,
+            )
+            target_guidance_sampling_duration_sec = (
+                perf_counter() - target_guidance_sampling_start
+            )
+        else:
+            replay_sampling_start = perf_counter()
+            replay_target_count = _compute_replay_target_count(
+                on_policy_count=len(on_policy_trajectories),
+                replay_fraction=self.config.replay.replay_fraction,
+                legacy_replay_batch_size=self.config.replay.replay_batch_size,
+            )
+            if self.replay_buffer is not None and replay_target_count > 0:
+                replay_sample = self.replay_buffer.sample(
+                    replay_target_count,
+                    rng=self.replay_rng,
+                    with_replacement=self.config.replay.with_replacement,
+                )
+                replay_trajectories = list(replay_sample.trajectories)
+            replay_sampling_duration_sec = perf_counter() - replay_sampling_start
+
+            if self.replay_buffer is not None:
+                self.replay_buffer.extend(on_policy_trajectories)
+
+        optimization_trajectories = [
+            *on_policy_trajectories,
+            *target_prefix_trajectories,
+            *target_teacher_trajectories,
+            *replay_trajectories,
+        ]
+        target_prefix_batch = OnPolicyBatch.from_trajectories(target_prefix_trajectories)
+        target_teacher_batch = OnPolicyBatch.from_trajectories(target_teacher_trajectories)
+
+        if not optimization_trajectories:
             iteration_duration_sec = perf_counter() - iteration_start
             metrics: dict[str, Any] = {
                 "iteration": float(iteration_index),
                 "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
                 "num_on_policy_trajectories": 0.0,
+                "num_target_prefix_trajectories": 0.0,
+                "num_target_teacher_trajectories": 0.0,
+                "num_target_guided_trajectories": 0.0,
                 "num_replay_trajectories": 0.0,
-                "configured_replay_fraction": float(self.config.replay.replay_fraction or 0.0),
+                "target_guidance_on_policy_fraction": (
+                    float(self.config.target_guidance.on_policy_fraction)
+                    if self.config.target_guidance.enabled
+                    else 0.0
+                ),
+                "target_guidance_prefix_fraction": (
+                    float(self.config.target_guidance.target_prefix_rollout_fraction)
+                    if self.config.target_guidance.enabled
+                    else 0.0
+                ),
+                "target_guidance_teacher_fraction": (
+                    float(self.config.target_guidance.target_teacher_fraction)
+                    if self.config.target_guidance.enabled
+                    else 0.0
+                ),
+                "target_prefix_valid_fraction": 0.0,
+                "target_teacher_valid_fraction": 0.0,
+                "target_prefix_mean_stage_reward": 0.0,
+                "target_teacher_mean_stage_reward": 0.0,
+                "configured_replay_fraction": (
+                    float(self.config.replay.replay_fraction or 0.0)
+                    if self.replay_buffer is not None
+                    else 0.0
+                ),
                 "replay_fraction": 0.0,
                 "replay_buffer_type": (
                     str(self.config.replay.buffer_type)
@@ -324,6 +520,7 @@ class MultiMoleculeGFlowNetTrainer:
                 "rollout_return_last_valid_trajectory_only": float(self.config.objective == "subtb"),
                 "sampling_duration_sec": sampling_duration_sec,
                 "replay_sampling_duration_sec": 0.0,
+                "target_guidance_sampling_duration_sec": target_guidance_sampling_duration_sec,
                 "scoring_duration_sec": 0.0,
                 "loss_duration_sec": 0.0,
                 "backward_duration_sec": 0.0,
@@ -355,27 +552,6 @@ class MultiMoleculeGFlowNetTrainer:
                 categorized_diagnostic_metrics=categorized_diagnostic_metrics,
             )
 
-        replay_sample = ReplaySampleBatch(())
-        replay_trajectories: list[SampledStageTrajectory] = []
-        replay_sampling_start = perf_counter()
-        replay_target_count = _compute_replay_target_count(
-            on_policy_count=len(on_policy_trajectories),
-            replay_fraction=self.config.replay.replay_fraction,
-            legacy_replay_batch_size=self.config.replay.replay_batch_size,
-        )
-        if self.replay_buffer is not None and replay_target_count > 0:
-            replay_sample = self.replay_buffer.sample(
-                replay_target_count,
-                rng=self.replay_rng,
-                with_replacement=self.config.replay.with_replacement,
-            )
-            replay_trajectories = list(replay_sample.trajectories)
-        replay_sampling_duration_sec = perf_counter() - replay_sampling_start
-
-        if self.replay_buffer is not None:
-            self.replay_buffer.extend(on_policy_trajectories)
-
-        optimization_trajectories = [*on_policy_trajectories, *replay_trajectories]
         scoring_start = perf_counter()
         scored_trajectories = self.score_trajectories(optimization_trajectories)
         scoring_duration_sec = perf_counter() - scoring_start
@@ -462,9 +638,41 @@ class MultiMoleculeGFlowNetTrainer:
             "max_num_actions": float(action_counts.max().item()) if action_counts.numel() > 0 else 0.0,
             "mean_stage_index": on_policy_batch.mean_stage_index(),
             "num_on_policy_trajectories": float(len(on_policy_trajectories)),
+            "num_target_prefix_trajectories": float(len(target_prefix_trajectories)),
+            "num_target_teacher_trajectories": float(len(target_teacher_trajectories)),
+            "num_target_guided_trajectories": float(
+                len(target_prefix_trajectories) + len(target_teacher_trajectories)
+            ),
             "num_replay_trajectories": float(len(replay_trajectories)),
-            "configured_replay_fraction": float(self.config.replay.replay_fraction or 0.0),
-            "replay_fraction": float(len(replay_trajectories) / len(optimization_trajectories)),
+            "target_guidance_on_policy_fraction": (
+                float(self.config.target_guidance.on_policy_fraction)
+                if self.config.target_guidance.enabled
+                else 0.0
+            ),
+            "target_guidance_prefix_fraction": (
+                float(self.config.target_guidance.target_prefix_rollout_fraction)
+                if self.config.target_guidance.enabled
+                else 0.0
+            ),
+            "target_guidance_teacher_fraction": (
+                float(self.config.target_guidance.target_teacher_fraction)
+                if self.config.target_guidance.enabled
+                else 0.0
+            ),
+            "target_prefix_valid_fraction": target_prefix_batch.valid_fraction(),
+            "target_teacher_valid_fraction": target_teacher_batch.valid_fraction(),
+            "target_prefix_mean_stage_reward": target_prefix_batch.mean_stage_reward(),
+            "target_teacher_mean_stage_reward": target_teacher_batch.mean_stage_reward(),
+            "configured_replay_fraction": (
+                float(self.config.replay.replay_fraction or 0.0)
+                if self.replay_buffer is not None
+                else 0.0
+            ),
+            "replay_fraction": float(
+                len(replay_trajectories) / len(optimization_trajectories)
+                if optimization_trajectories
+                else 0.0
+            ),
             "replay_buffer_type": (
                 str(self.config.replay.buffer_type)
                 if self.replay_buffer is not None
@@ -488,6 +696,7 @@ class MultiMoleculeGFlowNetTrainer:
             "mean_log_state_flow": _tensor_mean(all_log_state_flows),
             "sampling_duration_sec": sampling_duration_sec,
             "replay_sampling_duration_sec": replay_sampling_duration_sec,
+            "target_guidance_sampling_duration_sec": target_guidance_sampling_duration_sec,
             "scoring_duration_sec": scoring_duration_sec,
             "loss_duration_sec": loss_duration_sec,
             "backward_duration_sec": backward_duration_sec,
