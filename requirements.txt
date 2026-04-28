@@ -17,3 +17,4 @@ wandb>=0.17.0
 gdown
 requests>=2.31.0
 comet-ml>=3.44.0
+torchao>=0.17.0
