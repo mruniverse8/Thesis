@@ -83,6 +83,7 @@ class GFlowNetConfig:
     scoring_microbatch_size: int = 4
     objective: str = "tb"
     learning_rate: float = 5.0e-5
+    warmup_ratio: float = 0.0
     max_grad_norm: float = 1.0
     diagnostic_log_every_iterations: int = 25
     trajectory_preview_every_iterations: int = 25
@@ -179,6 +180,10 @@ class GFlowNetConfig:
             ),
             objective=objective,
             learning_rate=float(payload.get("learning_rate", cls.learning_rate)),
+            warmup_ratio=max(
+                0.0,
+                min(float(payload.get("warmup_ratio", cls.warmup_ratio)), 1.0),
+            ),
             max_grad_norm=float(payload.get("max_grad_norm", cls.max_grad_norm)),
             diagnostic_log_every_iterations=max(
                 1,

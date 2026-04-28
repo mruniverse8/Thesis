@@ -106,7 +106,20 @@ def test_gflownet_config_defaults_to_uncapped_optimization_trajectories() -> Non
 
     assert config.max_optimization_trajectories_per_iter is None
     assert config.scoring_microbatch_size == 4
+    assert config.warmup_ratio == 0.0
     assert config.to_dict()["max_optimization_trajectories_per_iter"] is None
+
+
+def test_gflownet_config_from_dict_parses_warmup_ratio() -> None:
+    config = GFlowNetConfig.from_dict({"warmup_ratio": 0.03})
+
+    assert config.warmup_ratio == 0.03
+    assert config.to_dict()["warmup_ratio"] == 0.03
+
+
+def test_gflownet_config_from_dict_clamps_warmup_ratio() -> None:
+    assert GFlowNetConfig.from_dict({"warmup_ratio": -0.2}).warmup_ratio == 0.0
+    assert GFlowNetConfig.from_dict({"warmup_ratio": 1.5}).warmup_ratio == 1.0
 
 
 def test_gflownet_config_clamps_scoring_microbatch_size_to_positive() -> None:

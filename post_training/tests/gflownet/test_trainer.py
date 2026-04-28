@@ -357,6 +357,67 @@ def test_objective_loss_is_scoring_microbatch_invariant(objective: str) -> None:
     assert losses[2] == pytest.approx(losses[0], abs=1.0e-7)
 
 
+def test_scheduled_learning_rate_ramps_over_configured_warmup_iterations() -> None:
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            gflownet_iterations=100,
+            learning_rate=1.0e-6,
+            warmup_ratio=0.03,
+        ),
+        device=torch.device("cpu"),
+    )
+
+    assert trainer._scheduled_learning_rate(1) == pytest.approx(1.0e-6 / 3.0)
+    assert trainer._scheduled_learning_rate(2) == pytest.approx(2.0e-6 / 3.0)
+    assert trainer._scheduled_learning_rate(3) == pytest.approx(1.0e-6)
+    assert trainer._scheduled_learning_rate(4) == pytest.approx(1.0e-6)
+
+
+def test_scheduled_learning_rate_stays_constant_without_warmup() -> None:
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            gflownet_iterations=100,
+            learning_rate=1.0e-6,
+            warmup_ratio=0.0,
+        ),
+        device=torch.device("cpu"),
+    )
+
+    assert trainer._scheduled_learning_rate(1) == pytest.approx(1.0e-6)
+    assert trainer._scheduled_learning_rate(50) == pytest.approx(1.0e-6)
+
+
+def test_train_iteration_reports_current_scheduled_learning_rate(monkeypatch) -> None:
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            gflownet_iterations=100,
+            learning_rate=9.0e-6,
+            warmup_ratio=0.03,
+            replay=ReplayConfig(enabled=False),
+            target_guidance=TargetGuidanceConfig(enabled=False),
+        ),
+        device=torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        trainer,
+        "collect_on_policy_trajectories",
+        lambda _examples, *, iteration_index: [],
+    )
+
+    warmup_result = trainer.train_iteration([{"id": "example-1"}], iteration_index=2)
+    post_warmup_result = trainer.train_iteration([{"id": "example-1"}], iteration_index=4)
+
+    assert warmup_result.metrics["learning_rate"] == pytest.approx(6.0e-6)
+    assert post_warmup_result.metrics["learning_rate"] == pytest.approx(9.0e-6)
+    assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(9.0e-6)
+
+
 @pytest.mark.parametrize(
     ("objective", "expected_return_last_valid_trajectory_only"),
     [

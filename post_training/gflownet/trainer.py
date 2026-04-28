@@ -231,6 +231,25 @@ class MultiMoleculeGFlowNetTrainer:
         self.best_checkpoint_dir: str | None = None
         self.best_checkpoint_zip: str | None = None
 
+    def _scheduled_learning_rate(self, iteration_index: int) -> float:
+        warmup_iterations = round(
+            max(0, int(self.config.gflownet_iterations))
+            * float(self.config.warmup_ratio)
+        )
+        if warmup_iterations <= 0:
+            return float(self.config.learning_rate)
+        if iteration_index <= warmup_iterations:
+            warmup_progress = max(
+                0.0,
+                float(iteration_index) / float(warmup_iterations),
+            )
+            return float(self.config.learning_rate) * warmup_progress
+        return float(self.config.learning_rate)
+
+    def _set_optimizer_learning_rate(self, learning_rate: float) -> None:
+        for parameter_group in self.optimizer.param_groups:
+            parameter_group["lr"] = float(learning_rate)
+
     def _run_sampling_eval(self, callback: Callable[[], Any]) -> Any:
         was_training = self.model.training
         self.model.eval()
@@ -511,6 +530,9 @@ class MultiMoleculeGFlowNetTrainer:
         iteration_index: int,
     ) -> GFlowNetTrainIterationResult:
         iteration_start = perf_counter()
+        self._set_optimizer_learning_rate(
+            self._scheduled_learning_rate(iteration_index)
+        )
         sampling_start = perf_counter()
         raw_on_policy_trajectories = self._run_sampling_eval(
             lambda: self.collect_on_policy_trajectories(

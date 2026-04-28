@@ -240,20 +240,37 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
     notebook = _load_notebook("colab/06_v2_train_multi_molecule_gflownet_lpm24.ipynb")
 
     assert notebook["nbformat"] == 4
-    assert len(notebook["cells"]) == 7
+    assert len(notebook["cells"]) == 8
 
     first_cell = _joined_source(notebook["cells"][0])
+    setup_cell = _joined_source(notebook["cells"][1])
     parameter_cell = _joined_source(notebook["cells"][2])
     run_cell = _joined_source(notebook["cells"][5])
+    eval_cell = _joined_source(notebook["cells"][6])
+    post_cell = _joined_source(notebook["cells"][7])
 
     assert "manual constrained beam-search rollout" in first_cell
+    assert "gflownet_v2.4" in first_cell
+    assert 'REPO_BRANCH = "gflownet_v2.4"' in setup_cell
     assert 'ROLLOUT_DECODING_STRATEGY = "beam"' in parameter_cell
-    assert "ROLLOUT_NUM_BEAMS = 3" in parameter_cell
+    assert "ROLLOUT_NUM_BEAMS = 2" in parameter_cell
     assert "ROLLOUT_LENGTH_PENALTY = 1.0" in parameter_cell
     assert "ROLLOUT_EARLY_STOPPING = True" in parameter_cell
+    assert "MAX_OPTIMIZATION_TRAJECTORIES_PER_ITER = 42" in parameter_cell
+    assert "GFLOWNET_SCORING_MICROBATCH_SIZE = 8" in parameter_cell
+    assert "GFLOWNET_LEARNING_RATE = 1e-6" in parameter_cell
+    assert "GFLOWNET_WARMUP_RATIO = 0.03" in parameter_cell
+    assert "TARGET_GUIDANCE_ENABLED = True" in parameter_cell
+    assert "TARGET_GUIDANCE_ON_POLICY_FRACTION = 0.25" in parameter_cell
+    assert "TARGET_GUIDANCE_PREFIX_FRACTION = 0.50" in parameter_cell
+    assert "TARGET_GUIDANCE_TEACHER_FRACTION = 0.25" in parameter_cell
+    assert "REPLAY_ENABLED = False" in parameter_cell
     assert 'REPLAY_BUFFER_TYPE = "experimental_mixture"' in parameter_cell
+    assert "REPLAY_FRACTION = 0.75" in parameter_cell
+    assert "GFLOWNET_REPORT_METRICS_PATH" in parameter_cell
     assert "ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK = False" in parameter_cell
     assert "beam rollout is controlled by the beam settings above" in parameter_cell
+    assert '"gflownet_warmup_ratio": GFLOWNET_WARMUP_RATIO' in parameter_cell
     assert '"rollout_decoding_strategy": ROLLOUT_DECODING_STRATEGY' in parameter_cell
     assert '"rollout_num_beams": ROLLOUT_NUM_BEAMS' in parameter_cell
     assert '"rollout_length_penalty": ROLLOUT_LENGTH_PENALTY' in parameter_cell
@@ -268,6 +285,27 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
     assert 'rollout_payload["length_penalty"] = float(ROLLOUT_LENGTH_PENALTY)' in run_cell
     assert 'rollout_payload["early_stopping"] = bool(ROLLOUT_EARLY_STOPPING)' in run_cell
     assert (
+        'gflownet_payload["max_optimization_trajectories_per_iter"] = '
+        "int(MAX_OPTIMIZATION_TRAJECTORIES_PER_ITER)"
+    ) in run_cell
+    assert 'gflownet_payload["learning_rate"] = float(GFLOWNET_LEARNING_RATE)' in run_cell
+    assert 'gflownet_payload["warmup_ratio"] = float(GFLOWNET_WARMUP_RATIO)' in run_cell
+    assert 'target_guidance_payload["enabled"] = bool(TARGET_GUIDANCE_ENABLED)' in run_cell
+    assert (
+        'target_guidance_payload["on_policy_fraction"] = '
+        "float(TARGET_GUIDANCE_ON_POLICY_FRACTION)"
+    ) in run_cell
+    assert (
+        'target_guidance_payload["target_prefix_rollout_fraction"] = '
+        "float(TARGET_GUIDANCE_PREFIX_FRACTION)"
+    ) in run_cell
+    assert (
+        'target_guidance_payload["target_teacher_fraction"] = '
+        "float(TARGET_GUIDANCE_TEACHER_FRACTION)"
+    ) in run_cell
+    assert 'replay_payload["enabled"] = bool(REPLAY_ENABLED)' in run_cell
+    assert 'replay_payload["replay_fraction"] = float(REPLAY_FRACTION)' in run_cell
+    assert (
         'reward_payload["enable_invalid_similarity_ngram_fallback"] = '
         "bool(ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK)"
     ) in run_cell
@@ -276,9 +314,86 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
     assert '"rollout_length_penalty": rollout_payload.get("length_penalty")' in run_cell
     assert '"rollout_early_stopping": rollout_payload.get("early_stopping")' in run_cell
     assert (
+        '"max_optimization_trajectories_per_iter": '
+        'gflownet_payload.get("max_optimization_trajectories_per_iter")'
+    ) in run_cell
+    assert '"gflownet_warmup_ratio": gflownet_payload.get("warmup_ratio")' in run_cell
+    assert '"target_guidance_enabled": target_guidance_payload.get("enabled")' in run_cell
+    assert (
+        '"target_guidance_on_policy_fraction": '
+        'target_guidance_payload.get("on_policy_fraction")'
+    ) in run_cell
+    assert (
         '"enable_invalid_similarity_ngram_fallback": '
         'reward_payload.get("enable_invalid_similarity_ngram_fallback")'
     ) in run_cell
+    assert '"gflownet_report_metrics_path": str(GFLOWNET_REPORT_METRICS_PATH)' in post_cell
+
+    assert "validation_evaluation_metrics.json" in eval_cell
+    assert "evaluate_generation_groups" in eval_cell
+    assert "evaluation_diagnosis" in eval_cell
+    assert "eval/novelty_fraction" in eval_cell
+    assert "wandb.log(evaluation_diagnosis)" in eval_cell
+
+
+def test_colab_lpm24_gflownet_08_notebook_stress_tests_memory_path() -> None:
+    notebook = _load_notebook("colab/08_stress_test_gflownet_memory_lpm24.ipynb")
+
+    assert notebook["nbformat"] == 4
+    assert len(notebook["cells"]) == 9
+
+    all_source = "\n".join(_joined_source(cell) for cell in notebook["cells"])
+    first_cell = _joined_source(notebook["cells"][0])
+    setup_cell = _joined_source(notebook["cells"][1])
+
+    assert "GFlowNet Memory Stress Test" in first_cell
+    assert 'REPO_BRANCH = "gflownet_v2.3"' in setup_cell
+    assert "scripts/init_colab.py" in all_source
+    assert '"--stage"' in all_source and '"gflownet"' in all_source
+    assert "GFlowNetModel.from_pretrained" in all_source
+    assert "model.score_action_sequence" in all_source
+    assert "ScoredStageTrajectory" in all_source
+    assert "loss.backward()" in all_source
+    assert "NUM_TRAJECTORIES_GRID = [1, 2, 4, 8, 12, 16, 24, 32]" in all_source
+    assert "PREFIX_TOKENS_GRID = [0, 128, 256, 512, 768]" in all_source
+    assert "ACTION_TOKENS_GRID = [64, 135, 192]" in all_source
+    assert "SOURCE_TOKENS = 512" in all_source
+    assert 'OBJECTIVE = "db"' in all_source
+    assert "AGGRESSIVE_MODE = False" in all_source
+    assert '"memory_stress_results.jsonl"' in all_source
+    assert '"memory_stress_summary.json"' in all_source
+    assert '"memory_stress_config.json"' in all_source
+    assert "torch.cuda.max_memory_allocated" in all_source
+    assert "peak_memory_allocated_gb" in all_source
+
+
+def test_colab_lpm24_sft_07_notebook_evaluates_checkpoint_without_post_training() -> None:
+    notebook = _load_notebook("colab/07_evaluate_multi_molecule_sft_lpm24.ipynb")
+
+    assert notebook["nbformat"] == 4
+    assert len(notebook["cells"]) == 10
+
+    all_source = "\n".join(_joined_source(cell) for cell in notebook["cells"])
+    first_cell = _joined_source(notebook["cells"][0])
+    setup_cell = _joined_source(notebook["cells"][1])
+    wandb_cell = _joined_source(notebook["cells"][4])
+
+    assert "gflownet_v2.3" in first_cell
+    assert 'REPO_BRANCH = "gflownet_v2.3"' in setup_cell
+    assert "T5ForConditionalGeneration" in all_source
+    assert "scripts/train_multi_molecule_gflownet.py" not in all_source
+    assert "WANDB_API_KEY =" in wandb_cell
+    assert "wandb.login(key=WANDB_API_KEY, relogin=True)" in wandb_cell
+    assert "wandb_v1_" in wandb_cell
+    assert 'LPM24_DATASET_DIR / "processed" / "test_multimol.jsonl"' in all_source
+    assert "validation_multimol.jsonl" in all_source
+    assert "evaluate_generation_groups" in all_source
+    assert "parse_staged_target" in all_source
+    assert "sft_validation_evaluation_metrics.json" in all_source
+    assert "sft_processed_test_evaluation_metrics.json" in all_source
+    assert "GENERATION_NUM_RETURN_SEQUENCES = 8" in all_source
+    assert "num_return_sequences=int(GENERATION_NUM_RETURN_SEQUENCES)" in all_source
+    assert "eval/novelty_fraction" in all_source
 
 
 def test_colab_lpm24_ppo_v2_notebook_reports_iteration_diagnostics_and_preview_summary() -> None:
