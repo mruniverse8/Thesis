@@ -20,6 +20,7 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
             "seed": 99,
             "objective": "db",
             "max_optimization_trajectories_per_iter": 16,
+            "scoring_microbatch_size": 3,
             "diagnostic_log_every_iterations": 12,
             "trajectory_preview_every_iterations": 8,
             "trajectory_preview_num_samples": 5,
@@ -62,6 +63,7 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.seed == 99
     assert config.objective == "db"
     assert config.max_optimization_trajectories_per_iter == 16
+    assert config.scoring_microbatch_size == 3
     assert config.diagnostic_log_every_iterations == 12
     assert config.trajectory_preview_every_iterations == 8
     assert config.trajectory_preview_num_samples == 5
@@ -95,6 +97,7 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.target_guidance.prefix_stage_strategy == "random"
     assert config.target_guidance.shuffle_target_selfies_list is True
     assert config.to_dict()["max_optimization_trajectories_per_iter"] == 16
+    assert config.to_dict()["scoring_microbatch_size"] == 3
     assert config.to_dict()["target_guidance"]["shuffle_target_selfies_list"] is True
 
 
@@ -102,7 +105,13 @@ def test_gflownet_config_defaults_to_uncapped_optimization_trajectories() -> Non
     config = GFlowNetConfig.from_dict({"max_optimization_trajectories_per_iter": None})
 
     assert config.max_optimization_trajectories_per_iter is None
+    assert config.scoring_microbatch_size == 4
     assert config.to_dict()["max_optimization_trajectories_per_iter"] is None
+
+
+def test_gflownet_config_clamps_scoring_microbatch_size_to_positive() -> None:
+    assert GFlowNetConfig.from_dict({"scoring_microbatch_size": 0}).scoring_microbatch_size == 1
+    assert GFlowNetConfig.from_dict({"scoring_microbatch_size": -2}).scoring_microbatch_size == 1
 
 
 def test_target_guidance_config_rejects_invalid_fraction_sum() -> None:
@@ -177,6 +186,7 @@ def test_gflownet_rollout_defaults_enable_constrained_decoding_and_tighter_sampl
     assert config.replay.enabled is False
     assert config.replay.buffer_type == "experimental_mixture"
     assert config.replay.replay_fraction == 0.75
+    assert config.scoring_microbatch_size == 4
     assert config.target_guidance.enabled is True
     assert config.target_guidance.on_policy_fraction == 0.25
     assert config.target_guidance.target_prefix_rollout_fraction == 0.50
@@ -260,6 +270,19 @@ def test_multi_molecule_gflownet_full_config_uses_conservative_rollout_defaults(
 
     assert config.rollout.temperature == 0.08
     assert config.rollout.top_p == 0.25
+
+
+def test_multi_molecule_gflownet_lpm24_config_preserves_v24_values() -> None:
+    config_path = Path(__file__).resolve().parents[3] / "configs" / "multi_molecule_gflownet_lpm24.yaml"
+    payload = load_yaml(config_path)
+
+    config = build_gflownet_config(payload)
+
+    assert config.batch_size == 2
+    assert config.max_optimization_trajectories_per_iter == 16
+    assert config.scoring_microbatch_size == 4
+    assert config.invalid_terminal_reward == pytest.approx(4.0e-2)
+    assert float(payload["reward"]["penalty_invalid"]) == pytest.approx(0.5)
 
 
 def test_resolve_gflownet_config_paths_falls_back_to_original_weights_for_missing_checkpoint(

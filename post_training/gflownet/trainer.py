@@ -377,7 +377,61 @@ class MultiMoleculeGFlowNetTrainer:
         self,
         trajectories: Sequence[SampledStageTrajectory],
     ) -> list[ScoredStageTrajectory]:
-        return [self.score_trajectory(trajectory) for trajectory in trajectories]
+        if not trajectories:
+            return []
+
+        scored: list[ScoredStageTrajectory] = []
+        decoder_start_token_id = int(self.model.policy_model.config.decoder_start_token_id)
+        stop_token_id = int(self.tokenizer.convert_tokens_to_ids(EOM_TOKEN))
+        microbatch_size = max(1, int(self.config.scoring_microbatch_size))
+
+        for start in range(0, len(trajectories), microbatch_size):
+            trajectory_batch = list(trajectories[start : start + microbatch_size])
+            prompt_inputs = self.tokenizer(
+                [trajectory.prompt_text for trajectory in trajectory_batch],
+                padding=True,
+                truncation=True,
+                max_length=self.config.rollout.max_source_length,
+                return_tensors="pt",
+            )
+            prompt_input_ids = prompt_inputs["input_ids"].to(self.device)
+            prompt_attention_mask = prompt_inputs.get("attention_mask")
+            if prompt_attention_mask is None:
+                prompt_attention_mask = torch.ones_like(prompt_input_ids)
+            else:
+                prompt_attention_mask = prompt_attention_mask.to(self.device)
+
+            decoder_prefix_ids = [
+                encode_decoder_prefix(
+                    self.tokenizer,
+                    trajectory.decoder_prefix_text,
+                    decoder_start_token_id=decoder_start_token_id,
+                    device=self.device,
+                )
+                for trajectory in trajectory_batch
+            ]
+            batch_scores = self.model.score_action_sequences(
+                input_ids=prompt_input_ids,
+                attention_mask=prompt_attention_mask,
+                decoder_prefix_ids=decoder_prefix_ids,
+                action_token_ids=[
+                    trajectory.action_token_ids for trajectory in trajectory_batch
+                ],
+                stop_token_id=stop_token_id,
+            )
+            for trajectory, (log_pf_tokens, log_stop, log_state_flows) in zip(
+                trajectory_batch,
+                batch_scores,
+            ):
+                scored.append(
+                    ScoredStageTrajectory(
+                        sampled=trajectory,
+                        log_pf_tokens=log_pf_tokens,
+                        log_stop=log_stop,
+                        log_state_flows=log_state_flows,
+                    )
+                )
+        return scored
 
     def _compute_objective_loss(
         self,

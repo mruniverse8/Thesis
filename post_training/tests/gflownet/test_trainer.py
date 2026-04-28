@@ -32,6 +32,7 @@ def _make_sampled_trajectory(
     *,
     rollout_id: str,
     terminal_reward: float,
+    prompt_text: str = "prompt",
     stage_index: int = 1,
     action_token_ids: tuple[int, ...] = (1, 2),
     target_selfies_list: tuple[str, ...] = ("[C][C][O]",),
@@ -44,7 +45,7 @@ def _make_sampled_trajectory(
     return SampledStageTrajectory(
         rollout_id=rollout_id,
         example_id=f"example-{rollout_id}",
-        prompt_text="prompt",
+        prompt_text=prompt_text,
         description="description",
         target_selfies_list=target_selfies_list,
         stage_index=stage_index,
@@ -66,6 +67,99 @@ def _make_sampled_trajectory(
             else {}
         ),
     )
+
+
+class _BatchScoringTokenizer:
+    def __init__(self) -> None:
+        self.batch_calls: list[dict[str, object]] = []
+
+    def __call__(
+        self,
+        text,
+        *,
+        padding=False,
+        truncation=False,
+        max_length=None,
+        return_tensors=None,
+        add_special_tokens=True,
+    ):
+        del add_special_tokens
+        if isinstance(text, list):
+            self.batch_calls.append(
+                {
+                    "texts": tuple(str(value) for value in text),
+                    "padding": padding,
+                    "truncation": truncation,
+                    "max_length": max_length,
+                    "return_tensors": return_tensors,
+                }
+            )
+            encoded = [self._encode_text(str(value)) for value in text]
+            max_encoded_length = max(len(token_ids) for token_ids in encoded)
+            padded = [
+                token_ids + [0] * (max_encoded_length - len(token_ids))
+                for token_ids in encoded
+            ]
+            masks = [
+                [1] * len(token_ids) + [0] * (max_encoded_length - len(token_ids))
+                for token_ids in encoded
+            ]
+            return {
+                "input_ids": torch.tensor(padded, dtype=torch.long),
+                "attention_mask": torch.tensor(masks, dtype=torch.long),
+            }
+
+        token_ids = self._encode_text(str(text))
+        return {
+            "input_ids": torch.tensor([token_ids], dtype=torch.long),
+            "attention_mask": torch.ones((1, len(token_ids)), dtype=torch.long),
+        }
+
+    def _encode_text(self, text: str) -> list[int]:
+        token_ids = [2]
+        token_ids.extend(3 + (ord(character) % 17) for character in text[:6])
+        return token_ids
+
+    def convert_tokens_to_ids(self, token: str) -> int:
+        if token == EOM_TOKEN:
+            return 7
+        return 0
+
+
+class _RecordingScoreModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.weight = torch.nn.Parameter(torch.tensor(1.0))
+        self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+        self.calls: list[tuple[tuple[int, ...], ...]] = []
+
+    def score_action_sequences(
+        self,
+        *,
+        input_ids,
+        attention_mask,
+        decoder_prefix_ids,
+        action_token_ids,
+        stop_token_id,
+    ):
+        del input_ids, attention_mask, decoder_prefix_ids, stop_token_id
+        normalized_action_ids = tuple(
+            tuple(int(token_id) for token_id in row_action_ids)
+            for row_action_ids in action_token_ids
+        )
+        self.calls.append(normalized_action_ids)
+        scores = []
+        for row_action_ids in normalized_action_ids:
+            anchor = float(row_action_ids[0] if row_action_ids else 1)
+            base = self.weight * (anchor / 100.0)
+            scores.append(
+                (
+                    tuple(base + 0.01 * index for index, _ in enumerate(row_action_ids)),
+                    tuple(base - 0.02 * index for index in range(len(row_action_ids) + 1)),
+                    tuple(base + 0.03 * index for index in range(len(row_action_ids) + 1)),
+                )
+            )
+        return scores
 
 
 def test_replay_fraction_converts_to_replay_dominant_target_count() -> None:
@@ -193,6 +287,74 @@ def test_select_optimization_trajectories_honors_priority_and_optional_cap() -> 
     assert [trajectory.rollout_id for trajectory in uncapped] == expected_priority
     assert [trajectory.rollout_id for trajectory in capped_candidates] == expected_priority
     assert [trajectory.rollout_id for trajectory in capped] == expected_priority[:5]
+
+
+def test_score_trajectories_preserves_order_across_scoring_microbatches() -> None:
+    tokenizer = _BatchScoringTokenizer()
+    model = _RecordingScoreModel()
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        config=GFlowNetConfig(
+            scoring_microbatch_size=2,
+            rollout=GFlowNetRolloutConfig(max_source_length=12),
+        ),
+        device=torch.device("cpu"),
+    )
+    trajectories = [
+        _make_sampled_trajectory(
+            rollout_id=f"trajectory-{index}",
+            prompt_text=f"prompt-{index}",
+            terminal_reward=1.0 + index,
+            action_token_ids=tuple(range(10 + index, 11 + index + (index % 3))),
+        )
+        for index in range(5)
+    ]
+
+    scored = trainer.score_trajectories(trajectories)
+
+    assert [trajectory.sampled.rollout_id for trajectory in scored] == [
+        trajectory.rollout_id for trajectory in trajectories
+    ]
+    assert [len(call) for call in model.calls] == [2, 2, 1]
+    assert model.calls[0] == (
+        trajectories[0].action_token_ids,
+        trajectories[1].action_token_ids,
+    )
+    assert tokenizer.batch_calls[0]["padding"] is True
+    assert tokenizer.batch_calls[0]["truncation"] is True
+    assert tokenizer.batch_calls[0]["max_length"] == 12
+    assert tokenizer.batch_calls[0]["return_tensors"] == "pt"
+
+
+@pytest.mark.parametrize("objective", ["tb", "db", "subtb"])
+def test_objective_loss_is_scoring_microbatch_invariant(objective: str) -> None:
+    trajectories = [
+        _make_sampled_trajectory(
+            rollout_id=f"trajectory-{index}",
+            terminal_reward=1.0 + 0.25 * index,
+            action_token_ids=tuple(range(10 + index, 12 + index + (index % 2))),
+        )
+        for index in range(4)
+    ]
+    losses: list[float] = []
+
+    for microbatch_size in (1, 2, 4):
+        trainer = MultiMoleculeGFlowNetTrainer(
+            model=_RecordingScoreModel(),
+            tokenizer=_BatchScoringTokenizer(),
+            config=GFlowNetConfig(
+                objective=objective,
+                scoring_microbatch_size=microbatch_size,
+            ),
+            device=torch.device("cpu"),
+        )
+        scored = trainer.score_trajectories(trajectories)
+        loss, _diagnostics = trainer._compute_objective_loss(scored)
+        losses.append(float(loss.detach().item()))
+
+    assert losses[1] == pytest.approx(losses[0], abs=1.0e-7)
+    assert losses[2] == pytest.approx(losses[0], abs=1.0e-7)
 
 
 @pytest.mark.parametrize(

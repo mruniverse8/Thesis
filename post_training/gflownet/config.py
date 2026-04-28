@@ -80,6 +80,7 @@ class GFlowNetConfig:
     gflownet_iterations: int = 200
     batch_size: int = 64
     max_optimization_trajectories_per_iter: int | None = None
+    scoring_microbatch_size: int = 4
     objective: str = "tb"
     learning_rate: float = 5.0e-5
     max_grad_norm: float = 1.0
@@ -166,6 +167,15 @@ class GFlowNetConfig:
             batch_size=max(1, int(payload.get("batch_size", cls.batch_size))),
             max_optimization_trajectories_per_iter=(
                 max_optimization_trajectories_per_iter
+            ),
+            scoring_microbatch_size=max(
+                1,
+                int(
+                    payload.get(
+                        "scoring_microbatch_size",
+                        cls.scoring_microbatch_size,
+                    )
+                ),
             ),
             objective=objective,
             learning_rate=float(payload.get("learning_rate", cls.learning_rate)),
