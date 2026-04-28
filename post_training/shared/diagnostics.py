@@ -46,6 +46,8 @@ _STAGE_ROLLOUT_METRIC_KEYS = frozenset(
         "mean_action_token_count",
         "max_action_token_count",
         "empty_action_rate",
+        "num_on_policy_trajectories_raw",
+        "num_on_policy_trajectories_trimmed",
         "num_rollouts",
         "mean_planned_trajectory_length",
         "max_planned_trajectory_length",

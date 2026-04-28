@@ -44,6 +44,89 @@ def encode_prompt(
     return {key: value.to(device) for key, value in encoded.items()}
 
 
+@dataclass(frozen=True)
+class EncoderCache:
+    last_hidden_state: torch.Tensor
+    attention_mask: torch.Tensor
+
+    def as_encoder_outputs(self) -> tuple[torch.Tensor]:
+        return (self.last_hidden_state,)
+
+
+def encode_prompt_cached(
+    model: GFlowNetModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt_text: str,
+    *,
+    max_source_length: int,
+    device: torch.device,
+) -> EncoderCache:
+    prompt_inputs = encode_prompt(
+        tokenizer,
+        prompt_text,
+        max_source_length=max_source_length,
+        device=device,
+    )
+    with torch.no_grad():
+        encoder_outputs = model.policy_model.get_encoder()(
+            input_ids=prompt_inputs["input_ids"],
+            attention_mask=prompt_inputs["attention_mask"],
+            return_dict=True,
+        )
+    return EncoderCache(
+        last_hidden_state=encoder_outputs.last_hidden_state,
+        attention_mask=prompt_inputs["attention_mask"],
+    )
+
+
+def _policy_model_prompt_kwargs(
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    encoder_cache: EncoderCache | None,
+) -> dict[str, object]:
+    if encoder_cache is None:
+        return {
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+    return {
+        "encoder_outputs": encoder_cache.as_encoder_outputs(),
+        "attention_mask": encoder_cache.attention_mask,
+    }
+
+
+def _encode_prompt_for_sampling(
+    model: GFlowNetModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt_text: str,
+    *,
+    max_source_length: int,
+    device: torch.device,
+) -> tuple[dict[str, torch.Tensor], EncoderCache | None]:
+    get_encoder = getattr(model.policy_model, "get_encoder", None)
+    if callable(get_encoder):
+        encoder_cache = encode_prompt_cached(
+            model,
+            tokenizer,
+            prompt_text,
+            max_source_length=max_source_length,
+            device=device,
+        )
+        prompt_inputs = {
+            "input_ids": torch.empty_like(encoder_cache.attention_mask),
+            "attention_mask": encoder_cache.attention_mask,
+        }
+        return prompt_inputs, encoder_cache
+
+    prompt_inputs = encode_prompt(
+        tokenizer,
+        prompt_text,
+        max_source_length=max_source_length,
+        device=device,
+    )
+    return prompt_inputs, None
+
+
 def encode_decoder_prefix(
     tokenizer: PreTrainedTokenizerBase,
     prefix_text: str,
@@ -317,7 +400,8 @@ def sample_target_prefix_stage_trajectory_for_example(
         previous_sampled_selfies,
         separator_token=generation_config.stage_separator,
     )
-    prompt_inputs = encode_prompt(
+    prompt_inputs, encoder_cache = _encode_prompt_for_sampling(
+        model,
         tokenizer,
         str(example["prompt"]),
         max_source_length=generation_config.max_source_length,
@@ -335,6 +419,7 @@ def sample_target_prefix_stage_trajectory_for_example(
         tokenizer,
         input_ids=prompt_inputs["input_ids"],
         attention_mask=prompt_inputs["attention_mask"],
+        encoder_cache=encoder_cache,
         decoder_prefix_ids=decoder_prefix_ids,
         generation_config=generation_config,
         stage_token_constraints=stage_token_constraints,
@@ -511,6 +596,7 @@ def beam_search_stage(
     *,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    encoder_cache: EncoderCache | None = None,
     decoder_prefix_ids: torch.Tensor,
     generation_config: GFlowNetRolloutConfig,
     stage_token_constraints: StageTokenConstraints | None = None,
@@ -551,8 +637,7 @@ def beam_search_stage(
                     continue
 
                 outputs = model.policy_model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
+                    **_policy_model_prompt_kwargs(input_ids, attention_mask, encoder_cache),
                     decoder_input_ids=beam.decoder_input_ids,
                     return_dict=True,
                 )
@@ -666,6 +751,7 @@ def sample_stage(
     *,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
+    encoder_cache: EncoderCache | None = None,
     decoder_prefix_ids: torch.Tensor,
     generation_config: GFlowNetRolloutConfig,
     stage_token_constraints: StageTokenConstraints | None = None,
@@ -677,6 +763,7 @@ def sample_stage(
             tokenizer,
             input_ids=input_ids,
             attention_mask=attention_mask,
+            encoder_cache=encoder_cache,
             decoder_prefix_ids=decoder_prefix_ids,
             generation_config=generation_config,
             stage_token_constraints=stage_token_constraints,
@@ -699,8 +786,7 @@ def sample_stage(
                 break
 
             outputs = model.policy_model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
+                **_policy_model_prompt_kwargs(input_ids, attention_mask, encoder_cache),
                 decoder_input_ids=current_decoder_input_ids,
                 return_dict=True,
             )
@@ -749,7 +835,8 @@ def sample_stage_trajectories_for_example(
     rng: random.Random | None = None,
     return_last_valid_trajectory_only: bool = False,
 ) -> list[SampledStageTrajectory]:
-    prompt_inputs = encode_prompt(
+    prompt_inputs, encoder_cache = _encode_prompt_for_sampling(
+        model,
         tokenizer,
         str(example["prompt"]),
         max_source_length=generation_config.max_source_length,
@@ -779,6 +866,7 @@ def sample_stage_trajectories_for_example(
             tokenizer,
             input_ids=prompt_inputs["input_ids"],
             attention_mask=prompt_inputs["attention_mask"],
+            encoder_cache=encoder_cache,
             decoder_prefix_ids=decoder_prefix_ids,
             generation_config=generation_config,
             stage_token_constraints=stage_token_constraints,

@@ -8,7 +8,12 @@ import torch
 
 from src.constants import EOM_TOKEN
 
-from post_training.gflownet.config import GFlowNetConfig, ReplayConfig, TargetGuidanceConfig
+from post_training.gflownet.config import (
+    GFlowNetConfig,
+    GFlowNetRolloutConfig,
+    ReplayConfig,
+    TargetGuidanceConfig,
+)
 from post_training.gflownet.diagnostics import GFlowNetTrainIterationResult
 from post_training.gflownet.trajectory import SampledStageTrajectory, ScoredStageTrajectory
 from post_training.gflownet.trainer import (
@@ -327,6 +332,112 @@ def test_train_iteration_mixes_on_policy_and_target_guided_sources(monkeypatch) 
         "median",
         "worst",
     }
+
+
+def test_train_iteration_trims_on_policy_before_target_guidance_counts(monkeypatch) -> None:
+    class DummyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+            self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+
+        def save_checkpoint(self, *args, **kwargs):
+            del args, kwargs
+            return None
+
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=DummyModel(),
+        tokenizer=None,
+        config=GFlowNetConfig(
+            batch_size=1,
+            objective="tb",
+            save_every_iterations=99,
+            diagnostic_log_every_iterations=1,
+            trajectory_preview_every_iterations=99,
+            rollout=GFlowNetRolloutConfig(max_molecules_per_sequence=2),
+            target_guidance=TargetGuidanceConfig(
+                enabled=True,
+                on_policy_fraction=0.25,
+                target_prefix_rollout_fraction=0.50,
+                target_teacher_fraction=0.25,
+            ),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    raw_on_policy = [
+        _make_sampled_trajectory(rollout_id=f"fresh-{index}", terminal_reward=1.0 + index)
+        for index in range(4)
+    ]
+    target_prefix_items = [
+        _make_sampled_trajectory(
+            rollout_id=f"target-prefix-{index}",
+            terminal_reward=5.0,
+            metadata_source="target_prefix_rollout",
+        )
+        for index in range(4)
+    ]
+    target_teacher_items = [
+        _make_sampled_trajectory(
+            rollout_id=f"target-teacher-{index}",
+            terminal_reward=6.0,
+            metadata_source="target_teacher",
+        )
+        for index in range(2)
+    ]
+    sampling_modes: list[bool] = []
+    score_modes: list[bool] = []
+    prefix_calls: list[int] = []
+    teacher_calls: list[int] = []
+
+    def fake_collect_on_policy(_examples, *, iteration_index):
+        del _examples, iteration_index
+        sampling_modes.append(trainer.model.training)
+        return raw_on_policy
+
+    def fake_collect_target_prefix(_examples, *, iteration_index, count):
+        del _examples, iteration_index
+        sampling_modes.append(trainer.model.training)
+        prefix_calls.append(int(count))
+        return target_prefix_items[:count]
+
+    def fake_collect_target_teacher(_examples, *, iteration_index, count):
+        del _examples, iteration_index
+        sampling_modes.append(trainer.model.training)
+        teacher_calls.append(int(count))
+        return target_teacher_items[:count]
+
+    def fake_score(trajectories):
+        score_modes.append(trainer.model.training)
+        base = trainer.model.weight
+        return [
+            ScoredStageTrajectory(
+                sampled=trajectory,
+                log_pf_tokens=tuple(base * 0.1 for _ in trajectory.action_token_ids),
+                log_stop=tuple(base * -0.2 for _ in range(len(trajectory.action_token_ids) + 1)),
+                log_state_flows=tuple(
+                    base * 0.3 for _ in range(len(trajectory.action_token_ids) + 1)
+                ),
+            )
+            for trajectory in trajectories
+        ]
+
+    monkeypatch.setattr(trainer, "collect_on_policy_trajectories", fake_collect_on_policy)
+    monkeypatch.setattr(trainer, "collect_target_prefix_trajectories", fake_collect_target_prefix)
+    monkeypatch.setattr(trainer, "collect_target_teacher_trajectories", fake_collect_target_teacher)
+    monkeypatch.setattr(trainer, "score_trajectories", fake_score)
+
+    result = trainer.train_iteration([{"id": "unused"}], iteration_index=1)
+
+    assert result.metrics["num_on_policy_trajectories_raw"] == pytest.approx(4.0)
+    assert result.metrics["num_on_policy_trajectories"] == pytest.approx(2.0)
+    assert result.metrics["num_on_policy_trajectories_trimmed"] == pytest.approx(2.0)
+    assert result.metrics["num_target_prefix_trajectories"] == pytest.approx(4.0)
+    assert result.metrics["num_target_teacher_trajectories"] == pytest.approx(2.0)
+    assert prefix_calls == [4]
+    assert teacher_calls == [2]
+    assert sampling_modes == [False, False, False]
+    assert score_modes == [True]
 
 
 def test_train_iteration_proceeds_with_target_teacher_when_on_policy_is_empty(

@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import random
 from time import perf_counter
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import torch
 from transformers import AutoTokenizer
@@ -174,6 +174,14 @@ class MultiMoleculeGFlowNetTrainer:
         self.best_checkpoint_iteration: int | None = None
         self.best_checkpoint_dir: str | None = None
         self.best_checkpoint_zip: str | None = None
+
+    def _run_sampling_eval(self, callback: Callable[[], Any]) -> Any:
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            return callback()
+        finally:
+            self.model.train(was_training)
 
     def collect_on_policy_trajectories(
         self,
@@ -394,10 +402,15 @@ class MultiMoleculeGFlowNetTrainer:
     ) -> GFlowNetTrainIterationResult:
         iteration_start = perf_counter()
         sampling_start = perf_counter()
-        on_policy_trajectories = self.collect_on_policy_trajectories(
-            examples,
-            iteration_index=iteration_index,
+        raw_on_policy_trajectories = self._run_sampling_eval(
+            lambda: self.collect_on_policy_trajectories(
+                examples,
+                iteration_index=iteration_index,
+            )
         )
+        max_on_policy_trajectories = max(1, int(self.config.rollout.max_molecules_per_sequence))
+        on_policy_trajectories = raw_on_policy_trajectories[:max_on_policy_trajectories]
+        on_policy_trimmed_count = len(raw_on_policy_trajectories) - len(on_policy_trajectories)
         sampling_duration_sec = perf_counter() - sampling_start
         on_policy_batch = OnPolicyBatch.from_trajectories(on_policy_trajectories)
 
@@ -427,15 +440,19 @@ class MultiMoleculeGFlowNetTrainer:
                 source_fraction=teacher_fraction,
                 off_policy_fraction=off_policy_fraction,
             )
-            target_prefix_trajectories = self.collect_target_prefix_trajectories(
-                examples,
-                iteration_index=iteration_index,
-                count=target_prefix_count,
-            )
-            target_teacher_trajectories = self.collect_target_teacher_trajectories(
-                examples,
-                iteration_index=iteration_index,
-                count=target_teacher_count,
+            target_prefix_trajectories, target_teacher_trajectories = self._run_sampling_eval(
+                lambda: (
+                    self.collect_target_prefix_trajectories(
+                        examples,
+                        iteration_index=iteration_index,
+                        count=target_prefix_count,
+                    ),
+                    self.collect_target_teacher_trajectories(
+                        examples,
+                        iteration_index=iteration_index,
+                        count=target_teacher_count,
+                    ),
+                )
             )
             target_guidance_sampling_duration_sec = (
                 perf_counter() - target_guidance_sampling_start
@@ -473,7 +490,9 @@ class MultiMoleculeGFlowNetTrainer:
             metrics: dict[str, Any] = {
                 "iteration": float(iteration_index),
                 "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
-                "num_on_policy_trajectories": 0.0,
+                "num_on_policy_trajectories": float(len(on_policy_trajectories)),
+                "num_on_policy_trajectories_raw": float(len(raw_on_policy_trajectories)),
+                "num_on_policy_trajectories_trimmed": float(on_policy_trimmed_count),
                 "num_target_prefix_trajectories": 0.0,
                 "num_target_teacher_trajectories": 0.0,
                 "num_target_guided_trajectories": 0.0,
@@ -638,6 +657,8 @@ class MultiMoleculeGFlowNetTrainer:
             "max_num_actions": float(action_counts.max().item()) if action_counts.numel() > 0 else 0.0,
             "mean_stage_index": on_policy_batch.mean_stage_index(),
             "num_on_policy_trajectories": float(len(on_policy_trajectories)),
+            "num_on_policy_trajectories_raw": float(len(raw_on_policy_trajectories)),
+            "num_on_policy_trajectories_trimmed": float(on_policy_trimmed_count),
             "num_target_prefix_trajectories": float(len(target_prefix_trajectories)),
             "num_target_teacher_trajectories": float(len(target_teacher_trajectories)),
             "num_target_guided_trajectories": float(

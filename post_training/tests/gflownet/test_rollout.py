@@ -10,8 +10,10 @@ from src.constants import EOM_TOKEN
 
 from post_training.gflownet.config import GFlowNetRolloutConfig
 from post_training.gflownet.rollout import (
+    EncoderCache,
     build_sampled_stage_trajectory_from_generation,
     build_target_teacher_stage_trajectory_for_example,
+    encode_prompt_cached,
     sample_stage,
     sample_stage_trajectories_for_example,
     sample_target_prefix_stage_trajectory_for_example,
@@ -109,12 +111,14 @@ class PrefixLogitPolicyModel:
     def __call__(
         self,
         *,
-        input_ids: torch.Tensor,
-        attention_mask: torch.Tensor,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        encoder_outputs=None,
         decoder_input_ids: torch.Tensor,
         return_dict: bool,
+        **kwargs,
     ) -> SimpleNamespace:
-        del input_ids, attention_mask, return_dict
+        del input_ids, attention_mask, encoder_outputs, return_dict, kwargs
         action_prefix = tuple(int(token_id) for token_id in decoder_input_ids[0, 1:].tolist())
         self.calls.append(action_prefix)
         logits = torch.full((1, decoder_input_ids.size(1), self.vocab_size), -20.0)
@@ -136,6 +140,55 @@ class PrefixLogitModel:
             vocab_size=vocab_size,
             eos_token_id=eos_token_id,
         )
+
+
+class CountingEncoder:
+    def __init__(self) -> None:
+        self.calls: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+    def __call__(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        return_dict: bool,
+    ) -> SimpleNamespace:
+        del return_dict
+        self.calls.append((input_ids.clone(), attention_mask.clone()))
+        hidden_state = input_ids.float().unsqueeze(-1)
+        return SimpleNamespace(last_hidden_state=hidden_state)
+
+
+class CachedPromptPolicyModel:
+    def __init__(self) -> None:
+        self.config = SimpleNamespace(decoder_start_token_id=0, eos_token_id=99)
+        self.encoder = CountingEncoder()
+
+    def get_encoder(self) -> CountingEncoder:
+        return self.encoder
+
+
+class CachedPromptModel:
+    def __init__(self) -> None:
+        self.policy_model = CachedPromptPolicyModel()
+
+
+def test_encode_prompt_cached_runs_encoder_once() -> None:
+    tokenizer = DummyTokenizer({}, {})
+    model = CachedPromptModel()
+
+    cache = encode_prompt_cached(
+        model,
+        tokenizer,
+        "prompt",
+        max_source_length=8,
+        device=torch.device("cpu"),
+    )
+
+    assert isinstance(cache, EncoderCache)
+    assert len(model.policy_model.encoder.calls) == 1
+    assert cache.last_hidden_state.shape == (1, 2, 1)
+    assert cache.attention_mask.tolist() == [[1, 1]]
 
 
 def test_build_sampled_stage_trajectory_from_generation_keeps_stop_out_of_action_ids() -> None:
@@ -270,6 +323,63 @@ def test_sample_target_prefix_stage_trajectory_uses_target_prefix_and_model_samp
     assert trajectory.metadata["trajectory_source"] == "target_prefix_rollout"
     assert trajectory.metadata["target_guided_stage_index"] == 2
     assert observed_prefix_lengths == [5]
+
+
+def test_sample_target_prefix_stage_trajectory_passes_encoder_cache(monkeypatch) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: " ",
+            5: "[C][C][N]",
+        },
+        {
+            "<bom>": 1,
+            "[C][C][O]": 2,
+            EOM_TOKEN: 3,
+            " ": 4,
+            "[C][C][N]": 5,
+        },
+    )
+    model = CachedPromptModel()
+    seen_caches: list[EncoderCache | None] = []
+
+    def fake_sample_stage(*args, **kwargs):
+        del args
+        seen_caches.append(kwargs["encoder_cache"])
+        return {
+            "stage_text": "<bom>[C][C][N]<eom>",
+            "sampled_selfies": "[C][C][N]",
+            "action_token_ids": (1, 5),
+            "metadata": {"raw_stage_text": "<bom>[C][C][N]<eom>"},
+            "stop_token": EOM_TOKEN,
+            "termination_reason": "stop_token",
+        }
+
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage", fake_sample_stage)
+
+    trajectory = sample_target_prefix_stage_trajectory_for_example(
+        model,
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="target-prefix-1",
+        generation_config=GFlowNetRolloutConfig(max_molecules_per_sequence=8),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+        rng=FixedRandrange([1]),
+    )
+
+    assert trajectory.stage_index == 2
+    assert len(model.policy_model.encoder.calls) == 1
+    assert len(seen_caches) == 1
+    assert seen_caches[0] is not None
 
 
 def test_build_target_teacher_stage_trajectory_for_example_forces_target_stage() -> None:
@@ -1244,6 +1354,71 @@ def test_sample_stage_trajectories_for_example_uses_max_molecules_for_planned_st
     assert [trajectory.stage_index for trajectory in trajectories] == [1, 2, 3]
 
 
+def test_sample_stage_trajectories_for_example_reuses_encoder_cache(monkeypatch) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: "<bom>",
+            5: "[C][C][N]",
+        },
+        {EOM_TOKEN: 3},
+    )
+    model = CachedPromptModel()
+    samples = iter(
+        [
+            {
+                "stage_text": "<bom>[C][C][O]<eom>",
+                "sampled_selfies": "[C][C][O]",
+                "action_token_ids": (1, 2),
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+            },
+            {
+                "stage_text": "<bom>[C][C][N]<eom>",
+                "sampled_selfies": "[C][C][N]",
+                "action_token_ids": (4, 5),
+                "stop_token": EOM_TOKEN,
+                "termination_reason": "stop_token",
+            },
+        ]
+    )
+    seen_caches: list[EncoderCache | None] = []
+
+    def fake_sample_stage(*args, **kwargs):
+        del args
+        seen_caches.append(kwargs["encoder_cache"])
+        return next(samples)
+
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage", fake_sample_stage)
+
+    trajectories = sample_stage_trajectories_for_example(
+        model,
+        tokenizer,
+        {
+            "id": "example-1",
+            "prompt": "prompt",
+            "description": "description",
+            "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+        },
+        rollout_id="rollout-1",
+        generation_config=GFlowNetRolloutConfig(
+            max_molecules_per_sequence=2,
+            append_probability=1.0,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+    )
+
+    assert [trajectory.stage_index for trajectory in trajectories] == [1, 2]
+    assert len(model.policy_model.encoder.calls) == 1
+    assert len(seen_caches) == 2
+    assert seen_caches[0] is seen_caches[1]
+    assert seen_caches[0] is not None
+
+
 def test_sample_stage_keeps_raw_action_ids_when_projection_is_invalid() -> None:
     tokenizer = DummyTokenizer(
         {
@@ -1429,6 +1604,58 @@ def test_sample_stage_beam_search_selects_best_completed_eom_beam() -> None:
     assert stage_sample["metadata"]["num_beams"] == 2
     assert stage_sample["metadata"]["beam_rank"] == 0
     assert stage_sample["metadata"]["raw_action_token_ids"] == (1, 2)
+
+
+def test_sample_stage_beam_search_accepts_encoder_cache() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+        },
+    )
+    token_constraints = StageTokenConstraints(
+        bom_token_id=1,
+        eom_token_id=3,
+        content_token_ids=(2,),
+    )
+    model = PrefixLogitModel(
+        {
+            (): {1: 8.0},
+            (1,): {2: 8.0},
+            (1, 2): {3: 8.0},
+        },
+        vocab_size=8,
+    )
+    attention_mask = torch.tensor([[1, 1]], dtype=torch.long)
+    encoder_cache = EncoderCache(
+        last_hidden_state=torch.zeros((1, 2, 1)),
+        attention_mask=attention_mask,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.empty_like(attention_mask),
+        attention_mask=attention_mask,
+        encoder_cache=encoder_cache,
+        decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="beam",
+            num_beams=1,
+            max_stage_new_tokens=4,
+        ),
+        stage_token_constraints=token_constraints,
+    )
+
+    assert stage_sample["stage_text"] == "<bom>[C]<eom>"
+    assert stage_sample["termination_reason"] == "stop_token"
+    assert model.policy_model.calls == [(), (1,), (1, 2)]
 
 
 def test_sample_stage_beam_search_cuts_beam_at_eom() -> None:
