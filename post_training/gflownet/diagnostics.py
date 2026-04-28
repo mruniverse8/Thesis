@@ -7,6 +7,7 @@ from typing import Any, Sequence
 
 import torch
 
+from molecules.parsing import parse_molecule_text
 from molecules.selfies import decode_biot5_selfies
 
 from .trajectory import SampledStageTrajectory
@@ -50,6 +51,118 @@ GFLOWNET_TRACKER_HEADLINE_METRIC_KEYS = frozenset(
         "grad_norm",
         "all_finite",
     }
+)
+
+GFLOWNET_REPORT_MAIN_METRIC_KEYS = (
+    "loss_function",
+    "average_on_policy_reward",
+    "average_teacher_reward",
+    "average_valid_on_policy",
+    "average_valid_teacher",
+    "average_trajectory_length_on_policy",
+    "novelty_fraction_on_policy",
+)
+
+GFLOWNET_REPORT_APPENDIX_METRIC_KEYS = (
+    "average_prefix_reward",
+    "average_valid_prefix",
+    "average_training_reward",
+    "duplicate_count_on_policy",
+    "num_novel_on_policy",
+    "num_valid_on_policy_for_novelty",
+    "gradient_norm",
+    "termination_fraction_stop_token",
+    "termination_fraction_max_stage_new_tokens",
+    "iteration_duration_sec",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class GFlowNetReportMetricSpec:
+    output_key: str
+    source_key: str
+    weight_key: str | None = None
+    cumulative_count: bool = False
+
+
+@dataclass(slots=True)
+class _GFlowNetReportMetricState:
+    running_sum: float = 0.0
+    weight_sum: float = 0.0
+
+
+GFLOWNET_REPORT_MAIN_METRICS = (
+    GFlowNetReportMetricSpec("loss_function", "objective_loss"),
+    GFlowNetReportMetricSpec(
+        "average_on_policy_reward",
+        "mean_stage_reward",
+        weight_key="num_on_policy_trajectories",
+    ),
+    GFlowNetReportMetricSpec(
+        "average_teacher_reward",
+        "target_teacher_mean_stage_reward",
+        weight_key="num_target_teacher_trajectories",
+    ),
+    GFlowNetReportMetricSpec(
+        "average_valid_on_policy",
+        "valid_fraction",
+        weight_key="num_on_policy_trajectories",
+    ),
+    GFlowNetReportMetricSpec(
+        "average_valid_teacher",
+        "target_teacher_valid_fraction",
+        weight_key="num_target_teacher_trajectories",
+    ),
+    GFlowNetReportMetricSpec(
+        "average_trajectory_length_on_policy",
+        "mean_trajectory_length",
+        weight_key="num_rollouts",
+    ),
+    GFlowNetReportMetricSpec(
+        "novelty_fraction_on_policy",
+        "novelty_fraction_on_policy",
+        weight_key="num_valid_on_policy_for_novelty",
+    ),
+)
+
+GFLOWNET_REPORT_APPENDIX_METRICS = (
+    GFlowNetReportMetricSpec(
+        "average_prefix_reward",
+        "target_prefix_mean_stage_reward",
+        weight_key="num_target_prefix_trajectories",
+    ),
+    GFlowNetReportMetricSpec(
+        "average_valid_prefix",
+        "target_prefix_valid_fraction",
+        weight_key="num_target_prefix_trajectories",
+    ),
+    GFlowNetReportMetricSpec(
+        "average_training_reward",
+        "mean_training_stage_reward",
+        weight_key="num_optimization_trajectories",
+    ),
+    GFlowNetReportMetricSpec(
+        "duplicate_count_on_policy",
+        "duplicate_count_on_policy",
+        cumulative_count=True,
+    ),
+    GFlowNetReportMetricSpec("num_novel_on_policy", "num_novel_on_policy"),
+    GFlowNetReportMetricSpec(
+        "num_valid_on_policy_for_novelty",
+        "num_valid_on_policy_for_novelty",
+    ),
+    GFlowNetReportMetricSpec("gradient_norm", "grad_norm"),
+    GFlowNetReportMetricSpec(
+        "termination_fraction_stop_token",
+        "termination_fraction_stop_token",
+        weight_key="num_on_policy_trajectories",
+    ),
+    GFlowNetReportMetricSpec(
+        "termination_fraction_max_stage_new_tokens",
+        "termination_fraction_max_stage_new_tokens",
+        weight_key="num_on_policy_trajectories",
+    ),
+    GFlowNetReportMetricSpec("iteration_duration_sec", "iteration_duration_sec"),
 )
 
 
@@ -115,6 +228,127 @@ def safe_rate(count: int | float, duration_sec: float) -> float:
     if duration_sec <= 0.0:
         return 0.0
     return float(count) / duration_sec
+
+
+def _metric_float(metrics: dict[str, Any], key: str, default: float = 0.0) -> float:
+    value = metrics.get(key, default)
+    if value is None:
+        return default
+    return float(value)
+
+
+class GFlowNetReportAccumulator:
+    def __init__(self) -> None:
+        self._states: dict[str, _GFlowNetReportMetricState] = {}
+
+    def _state_for(self, metric_key: str) -> _GFlowNetReportMetricState:
+        state = self._states.get(metric_key)
+        if state is None:
+            state = _GFlowNetReportMetricState()
+            self._states[metric_key] = state
+        return state
+
+    def _update_metric(
+        self,
+        metrics: dict[str, Any],
+        spec: GFlowNetReportMetricSpec,
+    ) -> dict[str, float]:
+        value = _metric_float(metrics, spec.source_key)
+        state = self._state_for(spec.output_key)
+
+        if spec.cumulative_count:
+            state.running_sum += value
+            return {
+                f"{spec.output_key}_step": value,
+                f"{spec.output_key}_running_sum": state.running_sum,
+            }
+
+        weight = _metric_float(metrics, spec.weight_key, 0.0) if spec.weight_key else 1.0
+        if weight < 0.0:
+            weight = 0.0
+        weighted_value = value * weight
+        state.running_sum += weighted_value
+        state.weight_sum += weight
+        running_mean = (
+            state.running_sum / state.weight_sum
+            if state.weight_sum > 0.0
+            else 0.0
+        )
+        return {
+            f"{spec.output_key}_step": value,
+            f"{spec.output_key}_running_sum": state.running_sum,
+            f"{spec.output_key}_running_mean": running_mean,
+            f"{spec.output_key}_weight_sum": state.weight_sum,
+        }
+
+    def _update_group(
+        self,
+        metrics: dict[str, Any],
+        specs: Sequence[GFlowNetReportMetricSpec],
+    ) -> dict[str, float]:
+        payload: dict[str, float] = {}
+        for spec in specs:
+            payload.update(self._update_metric(metrics, spec))
+        return payload
+
+    def update(self, metrics: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "iteration": metrics.get("iteration", 0.0),
+            "main": self._update_group(metrics, GFLOWNET_REPORT_MAIN_METRICS),
+            "appendix": self._update_group(metrics, GFLOWNET_REPORT_APPENDIX_METRICS),
+        }
+
+
+def _canonical_smiles_from_selfies(selfies_text: str | None) -> str | None:
+    if not selfies_text:
+        return None
+    record = parse_molecule_text(selfies_text, representation="selfies")
+    if not record.is_valid or record.canonical_smiles is None:
+        return None
+    return record.canonical_smiles
+
+
+def on_policy_novelty_metrics(
+    trajectories: Sequence[SampledStageTrajectory],
+) -> dict[str, float]:
+    num_valid = 0
+    num_novel = 0
+
+    canonical_cache: dict[str, str | None] = {}
+
+    def cached_canonical(selfies_text: str | None) -> str | None:
+        if not selfies_text:
+            return None
+        cached = canonical_cache.get(selfies_text)
+        if selfies_text in canonical_cache:
+            return cached
+        canonical = _canonical_smiles_from_selfies(selfies_text)
+        canonical_cache[selfies_text] = canonical
+        return canonical
+
+    for trajectory in trajectories:
+        if not trajectory.is_valid:
+            continue
+        generated_canonical = cached_canonical(trajectory.sampled_selfies)
+        if generated_canonical is None:
+            continue
+
+        num_valid += 1
+        target_canonical_smiles = {
+            canonical
+            for target_selfies in trajectory.target_selfies_list
+            if (canonical := cached_canonical(target_selfies)) is not None
+        }
+        if generated_canonical not in target_canonical_smiles:
+            num_novel += 1
+
+    return {
+        "num_novel_on_policy": float(num_novel),
+        "num_valid_on_policy_for_novelty": float(num_valid),
+        "novelty_fraction_on_policy": (
+            float(num_novel / num_valid) if num_valid > 0 else 0.0
+        ),
+    }
 
 
 def tracker_headline_metrics(metrics: dict[str, Any]) -> dict[str, Any]:

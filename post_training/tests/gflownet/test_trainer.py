@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import random
 from types import SimpleNamespace
 from zipfile import ZipFile
 
@@ -17,8 +18,10 @@ from post_training.gflownet.config import (
 from post_training.gflownet.diagnostics import GFlowNetTrainIterationResult
 from post_training.gflownet.trajectory import SampledStageTrajectory, ScoredStageTrajectory
 from post_training.gflownet.trainer import (
+    EpochBatchSampler,
     MultiMoleculeGFlowNetTrainer,
     _compute_replay_target_count,
+    _select_optimization_trajectories,
     run_multi_molecule_gflownet,
 )
 from post_training.shared.decoding import StageTokenConstraints
@@ -34,6 +37,8 @@ def _make_sampled_trajectory(
     target_selfies_list: tuple[str, ...] = ("[C][C][O]",),
     termination_reason: str = "stop_token",
     is_valid: bool = True,
+    sampled_selfies: str | None = "[C][C][O]",
+    is_duplicate: bool = False,
     metadata_source: str | None = None,
 ) -> SampledStageTrajectory:
     return SampledStageTrajectory(
@@ -46,7 +51,7 @@ def _make_sampled_trajectory(
         decoder_prefix_text="",
         previous_sampled_selfies=(),
         stage_text="<bom>[C][C][O]<eom>",
-        sampled_selfies="[C][C][O]",
+        sampled_selfies=sampled_selfies if is_valid else None,
         action_token_ids=action_token_ids,
         reward_breakdown={"amplified_reward": terminal_reward},
         prefix_rewards=tuple([1.0e-4] * len(action_token_ids) + [terminal_reward]),
@@ -54,7 +59,7 @@ def _make_sampled_trajectory(
         stop_token=EOM_TOKEN,
         termination_reason=termination_reason,
         is_valid=is_valid,
-        is_duplicate=False,
+        is_duplicate=is_duplicate,
         metadata=(
             {"trajectory_source": metadata_source}
             if metadata_source is not None
@@ -69,6 +74,125 @@ def test_replay_fraction_converts_to_replay_dominant_target_count() -> None:
         replay_fraction=0.75,
         legacy_replay_batch_size=0,
     ) == 12
+
+
+def test_epoch_batch_sampler_covers_epoch_before_repeating_and_allows_partial_batch() -> None:
+    dataset = [{"id": f"example-{index}"} for index in range(5)]
+    sampler = EpochBatchSampler(dataset, batch_size=2, rng=random.Random(7))
+
+    batches = [sampler.next_batch() for _ in range(3)]
+    first_epoch_ids = [
+        example["id"]
+        for batch, _epoch in batches
+        for example in batch
+    ]
+
+    assert [epoch for _batch, epoch in batches] == [1, 1, 1]
+    assert [len(batch) for batch, _epoch in batches] == [2, 2, 1]
+    assert set(first_epoch_ids) == {f"example-{index}" for index in range(5)}
+    assert len(first_epoch_ids) == len(set(first_epoch_ids))
+
+    next_epoch_batch, next_epoch = sampler.next_batch()
+    assert next_epoch == 2
+    assert len(next_epoch_batch) == 2
+
+
+def test_epoch_batch_sampler_reshuffles_at_epoch_boundary() -> None:
+    class RecordingRng:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def shuffle(self, values: list[int]) -> None:
+            self.calls += 1
+            if self.calls == 1:
+                values.reverse()
+            else:
+                values.sort()
+
+    dataset = [{"id": f"example-{index}"} for index in range(4)]
+    rng = RecordingRng()
+    sampler = EpochBatchSampler(dataset, batch_size=4, rng=rng)
+
+    first_epoch_batch, first_epoch = sampler.next_batch()
+    second_epoch_batch, second_epoch = sampler.next_batch()
+
+    assert first_epoch == 1
+    assert second_epoch == 2
+    assert rng.calls == 2
+    assert [example["id"] for example in first_epoch_batch] == [
+        "example-3",
+        "example-2",
+        "example-1",
+        "example-0",
+    ]
+    assert [example["id"] for example in second_epoch_batch] == [
+        "example-0",
+        "example-1",
+        "example-2",
+        "example-3",
+    ]
+
+
+def test_epoch_batch_sampler_is_seeded_deterministic() -> None:
+    dataset = [{"id": f"example-{index}"} for index in range(7)]
+
+    def collect(seed: int) -> list[tuple[tuple[str, ...], int]]:
+        sampler = EpochBatchSampler(dataset, batch_size=3, rng=random.Random(seed))
+        return [
+            (tuple(str(example["id"]) for example in batch), epoch)
+            for batch, epoch in (sampler.next_batch() for _ in range(6))
+        ]
+
+    assert collect(123) == collect(123)
+
+
+def test_select_optimization_trajectories_honors_priority_and_optional_cap() -> None:
+    teacher = [
+        _make_sampled_trajectory(rollout_id=f"teacher-{index}", terminal_reward=10.0)
+        for index in range(2)
+    ]
+    on_policy = [
+        _make_sampled_trajectory(rollout_id=f"on-policy-{index}", terminal_reward=2.0)
+        for index in range(2)
+    ]
+    prefix = [
+        _make_sampled_trajectory(rollout_id=f"prefix-{index}", terminal_reward=5.0)
+        for index in range(2)
+    ]
+    replay = [
+        _make_sampled_trajectory(rollout_id=f"replay-{index}", terminal_reward=1.0)
+        for index in range(2)
+    ]
+
+    candidates, uncapped = _select_optimization_trajectories(
+        target_teacher_trajectories=teacher,
+        on_policy_trajectories=on_policy,
+        target_prefix_trajectories=prefix,
+        replay_trajectories=replay,
+        max_optimization_trajectories_per_iter=None,
+    )
+    capped_candidates, capped = _select_optimization_trajectories(
+        target_teacher_trajectories=teacher,
+        on_policy_trajectories=on_policy,
+        target_prefix_trajectories=prefix,
+        replay_trajectories=replay,
+        max_optimization_trajectories_per_iter=5,
+    )
+
+    expected_priority = [
+        "teacher-0",
+        "teacher-1",
+        "on-policy-0",
+        "on-policy-1",
+        "prefix-0",
+        "prefix-1",
+        "replay-0",
+        "replay-1",
+    ]
+    assert [trajectory.rollout_id for trajectory in candidates] == expected_priority
+    assert [trajectory.rollout_id for trajectory in uncapped] == expected_priority
+    assert [trajectory.rollout_id for trajectory in capped_candidates] == expected_priority
+    assert [trajectory.rollout_id for trajectory in capped] == expected_priority[:5]
 
 
 @pytest.mark.parametrize(
@@ -288,6 +412,10 @@ def test_train_iteration_mixes_on_policy_and_target_guided_sources(monkeypatch) 
         (2.0 + 3.0 + 1.0e-4 + 4.0 + 8 * 5.0 + 4 * 6.0) / 16.0
     )
     assert metrics["valid_fraction"] == pytest.approx(0.75)
+    assert metrics["duplicate_count_on_policy"] == pytest.approx(0.0)
+    assert metrics["num_valid_on_policy_for_novelty"] == pytest.approx(3.0)
+    assert metrics["num_novel_on_policy"] == pytest.approx(0.0)
+    assert metrics["novelty_fraction_on_policy"] == pytest.approx(0.0)
     assert metrics["mean_num_actions"] == pytest.approx(2.5)
     assert metrics["max_num_actions"] == pytest.approx(4.0)
     assert metrics["mean_stage_index"] == pytest.approx(1.25)
@@ -438,6 +566,107 @@ def test_train_iteration_trims_on_policy_before_target_guidance_counts(monkeypat
     assert teacher_calls == [2]
     assert sampling_modes == [False, False, False]
     assert score_modes == [True]
+
+
+def test_train_iteration_caps_optimization_trajectories_after_priority_selection(
+    monkeypatch,
+) -> None:
+    class DummyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+            self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
+
+        def save_checkpoint(self, *args, **kwargs):
+            del args, kwargs
+            return None
+
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=DummyModel(),
+        tokenizer=None,
+        config=GFlowNetConfig(
+            batch_size=1,
+            objective="tb",
+            max_optimization_trajectories_per_iter=3,
+            save_every_iterations=99,
+            diagnostic_log_every_iterations=1,
+            trajectory_preview_every_iterations=99,
+            rollout=GFlowNetRolloutConfig(max_molecules_per_sequence=2),
+            target_guidance=TargetGuidanceConfig(
+                enabled=True,
+                on_policy_fraction=0.25,
+                target_prefix_rollout_fraction=0.50,
+                target_teacher_fraction=0.25,
+            ),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    on_policy = [
+        _make_sampled_trajectory(rollout_id=f"fresh-{index}", terminal_reward=1.0)
+        for index in range(2)
+    ]
+    target_prefix_items = [
+        _make_sampled_trajectory(
+            rollout_id=f"target-prefix-{index}",
+            terminal_reward=5.0,
+            metadata_source="target_prefix_rollout",
+        )
+        for index in range(4)
+    ]
+    target_teacher_items = [
+        _make_sampled_trajectory(
+            rollout_id=f"target-teacher-{index}",
+            terminal_reward=6.0,
+            metadata_source="target_teacher",
+        )
+        for index in range(2)
+    ]
+    scored_rollout_ids: list[str] = []
+
+    monkeypatch.setattr(
+        trainer,
+        "collect_on_policy_trajectories",
+        lambda _examples, iteration_index: on_policy,
+    )
+    monkeypatch.setattr(
+        trainer,
+        "collect_target_prefix_trajectories",
+        lambda _examples, *, iteration_index, count: target_prefix_items[:count],
+    )
+    monkeypatch.setattr(
+        trainer,
+        "collect_target_teacher_trajectories",
+        lambda _examples, *, iteration_index, count: target_teacher_items[:count],
+    )
+
+    def fake_score(trajectories):
+        scored_rollout_ids.extend(trajectory.rollout_id for trajectory in trajectories)
+        base = trainer.model.weight
+        return [
+            ScoredStageTrajectory(
+                sampled=trajectory,
+                log_pf_tokens=tuple(base * 0.1 for _ in trajectory.action_token_ids),
+                log_stop=tuple(base * -0.2 for _ in range(len(trajectory.action_token_ids) + 1)),
+                log_state_flows=tuple(
+                    base * 0.3 for _ in range(len(trajectory.action_token_ids) + 1)
+                ),
+            )
+            for trajectory in trajectories
+        ]
+
+    monkeypatch.setattr(trainer, "score_trajectories", fake_score)
+    monkeypatch.setattr(trainer, "save_best_checkpoint", lambda **kwargs: None)
+
+    result = trainer.train_iteration([{"id": "unused"}], iteration_index=1)
+
+    assert scored_rollout_ids == ["target-teacher-0", "target-teacher-1", "fresh-0"]
+    assert result.metrics["num_optimization_trajectories_raw"] == pytest.approx(8.0)
+    assert result.metrics["num_optimization_trajectories"] == pytest.approx(3.0)
+    assert result.metrics["num_optimization_trajectories_trimmed"] == pytest.approx(5.0)
+    assert result.metrics["max_optimization_trajectories_per_iter"] == pytest.approx(3.0)
+    assert result.metrics["num_target_teacher_trajectories"] == pytest.approx(2.0)
+    assert result.metrics["num_target_prefix_trajectories"] == pytest.approx(4.0)
 
 
 def test_train_iteration_proceeds_with_target_teacher_when_on_policy_is_empty(
@@ -617,6 +846,164 @@ def test_save_best_checkpoint_tracks_lowest_objective_loss_and_writes_zip(
     assert json.loads((checkpoint_dir / "iteration_metrics.json").read_text())["objective_loss"] == 1.0
 
 
+def test_run_multi_molecule_gflownet_uses_epoch_batches_for_configured_iterations(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    output_dir = tmp_path / "outputs" / "multi_molecule_gflownet"
+    trainer_instances = []
+
+    class DummyTokenizer:
+        def __init__(self) -> None:
+            self.model_max_length = 0
+
+    class DummyGFlowNetModel:
+        def __init__(self) -> None:
+            self.policy_model = object()
+
+        def to(self, device) -> None:
+            self.device = device
+
+    class DummyTracker:
+        def log_config(self, payload) -> None:
+            self.payload = payload
+
+        def log_metrics(self, metrics, *, step: int, prefix: str) -> None:
+            del metrics, step, prefix
+
+        def log_summary(self, summary, *, prefix: str) -> None:
+            del summary, prefix
+
+        def finish(self, *, status: str) -> None:
+            self.status = status
+
+    class DummyTrainer:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+            self.best_objective_loss = None
+            self.best_checkpoint_iteration = None
+            self.best_checkpoint_dir = None
+            self.best_checkpoint_zip = None
+            self.calls: list[tuple[int, list[str]]] = []
+            trainer_instances.append(self)
+
+        def train_iteration(self, examples, *, iteration_index: int) -> GFlowNetTrainIterationResult:
+            self.calls.append(
+                (iteration_index, [str(example["id"]) for example in examples])
+            )
+            return GFlowNetTrainIterationResult(
+                metrics={
+                    "iteration": float(iteration_index),
+                    "objective_loss": 1.0,
+                    "mean_stage_reward": 2.0,
+                    "valid_fraction": 1.0,
+                    "replay_size": 0.0,
+                    "replay_total_action_tokens": 0.0,
+                }
+            )
+
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.AutoTokenizer",
+        SimpleNamespace(from_pretrained=lambda *args, **kwargs: DummyTokenizer()),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.GFlowNetModel",
+        SimpleNamespace(from_pretrained=lambda *args, **kwargs: DummyGFlowNetModel()),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.assert_checkpoint_tokenizer_matches_model",
+        lambda *args, **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.build_reward_config",
+        lambda *args, **kwargs: SimpleNamespace(),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.choose_device",
+        lambda *_args, **_kwargs: torch.device("cpu"),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.MultiMoleculeGFlowNetTrainer",
+        DummyTrainer,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.MultiMoleculeDataset",
+        SimpleNamespace(
+            from_jsonl=lambda path: [
+                {"id": "example-0"},
+                {"id": "example-1"},
+                {"id": "example-2"},
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.prepare_gflownet_output_dir",
+        lambda *_args, **_kwargs: output_dir,
+    )
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.build_tracker",
+        lambda *args, **kwargs: DummyTracker(),
+    )
+
+    config = resolve_gflownet_config_paths(
+        {
+            "seed": 123,
+            "tracking": {"enabled": False},
+            "model": {"checkpoint": DEFAULT_PPO_FALLBACK_CHECKPOINT, "use_lora": False},
+            "data": {
+                "train_file": "data/train_multimol.jsonl",
+                "validation_file": "data/validation_multimol.jsonl",
+                "test_file": "data/test_multimol.jsonl",
+                "max_source_length": 512,
+            },
+            "training": {
+                "output_dir": str(output_dir),
+                "device": "cpu",
+                "save_every_iterations": 10,
+            },
+            "gflownet": {
+                "gflownet_iterations": 5,
+                "batch_size": 2,
+                "objective": "tb",
+                "rollout": {"constrained_decoding": False},
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    summary = run_multi_molecule_gflownet(config)
+
+    assert len(trainer_instances) == 1
+    assert [iteration for iteration, _examples in trainer_instances[0].calls] == [
+        1,
+        2,
+        3,
+        4,
+        5,
+    ]
+    assert [len(examples) for _iteration, examples in trainer_instances[0].calls] == [
+        2,
+        1,
+        2,
+        1,
+        2,
+    ]
+    assert [record["epoch"] for record in summary["history"]] == [
+        1.0,
+        1.0,
+        2.0,
+        2.0,
+        3.0,
+    ]
+    first_epoch_ids = [
+        example_id
+        for _iteration, examples in trainer_instances[0].calls[:2]
+        for example_id in examples
+    ]
+    assert set(first_epoch_ids) == {"example-0", "example-1", "example-2"}
+    assert summary["num_iterations"] == 5
+
+
 def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_model_loads(
     monkeypatch,
     tmp_path: Path,
@@ -672,11 +1059,30 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
                     "iteration": float(iteration_index),
                     "objective_loss": 1.25,
                     "mean_stage_reward": 2.5,
+                    "mean_training_stage_reward": 3.0,
                     "valid_fraction": 1.0,
+                    "num_on_policy_trajectories": 4.0,
+                    "num_optimization_trajectories": 8.0,
+                    "num_target_prefix_trajectories": 2.0,
+                    "num_target_teacher_trajectories": 2.0,
+                    "num_target_guided_trajectories": 4.0,
+                    "target_prefix_mean_stage_reward": 5.0,
+                    "target_teacher_mean_stage_reward": 6.0,
+                    "target_prefix_valid_fraction": 0.5,
+                    "target_teacher_valid_fraction": 0.5,
                     "replay_size": 0.0,
                     "replay_total_action_tokens": 0.0,
+                    "duplicate_count_on_policy": 1.0,
+                    "num_novel_on_policy": 1.0,
+                    "num_valid_on_policy_for_novelty": 4.0,
+                    "novelty_fraction_on_policy": 0.25,
                     "mean_trajectory_length": 1.0,
+                    "num_rollouts": 4.0,
                     "fraction_rollouts_trajectory_length_2_plus": 0.0,
+                    "grad_norm": 0.5,
+                    "termination_fraction_stop_token": 0.75,
+                    "termination_fraction_max_stage_new_tokens": 0.25,
+                    "iteration_duration_sec": 2.0,
                 },
                 diagnostic_metrics={
                     "iteration": float(iteration_index),
@@ -811,6 +1217,14 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
     diagnostic_calls = [
         payload for payload, _, prefix in tracker.metric_calls if prefix == "gflownet_diagnostics"
     ]
+    report_calls = [
+        payload for payload, _, prefix in tracker.metric_calls if prefix == "gflownet_report"
+    ]
+    report_appendix_calls = [
+        payload
+        for payload, _, prefix in tracker.metric_calls
+        if prefix == "gflownet_report_appendix"
+    ]
     categorized_calls = {
         prefix: payload
         for payload, _, prefix in tracker.metric_calls
@@ -821,9 +1235,19 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "iteration": 1.0,
             "objective_loss": 1.25,
             "mean_stage_reward": 2.5,
+            "mean_training_stage_reward": 3.0,
             "valid_fraction": 1.0,
+            "num_on_policy_trajectories": 4.0,
+            "num_target_prefix_trajectories": 2.0,
+            "num_target_teacher_trajectories": 2.0,
+            "num_target_guided_trajectories": 4.0,
+            "target_prefix_valid_fraction": 0.5,
+            "target_teacher_valid_fraction": 0.5,
+            "target_prefix_mean_stage_reward": 5.0,
+            "target_teacher_mean_stage_reward": 6.0,
             "replay_size": 0.0,
             "replay_total_action_tokens": 0.0,
+            "grad_norm": 0.5,
         }
     ]
     assert diagnostic_calls == [
@@ -835,6 +1259,81 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
             "fraction_rollouts_trajectory_length_2_plus": 0.0,
         }
     ]
+    assert report_calls == [
+        {
+            "loss_function_step": 1.25,
+            "loss_function_running_sum": 1.25,
+            "loss_function_running_mean": 1.25,
+            "loss_function_weight_sum": 1.0,
+            "average_on_policy_reward_step": 2.5,
+            "average_on_policy_reward_running_sum": 10.0,
+            "average_on_policy_reward_running_mean": 2.5,
+            "average_on_policy_reward_weight_sum": 4.0,
+            "average_teacher_reward_step": 6.0,
+            "average_teacher_reward_running_sum": 12.0,
+            "average_teacher_reward_running_mean": 6.0,
+            "average_teacher_reward_weight_sum": 2.0,
+            "average_valid_on_policy_step": 1.0,
+            "average_valid_on_policy_running_sum": 4.0,
+            "average_valid_on_policy_running_mean": 1.0,
+            "average_valid_on_policy_weight_sum": 4.0,
+            "average_valid_teacher_step": 0.5,
+            "average_valid_teacher_running_sum": 1.0,
+            "average_valid_teacher_running_mean": 0.5,
+            "average_valid_teacher_weight_sum": 2.0,
+            "average_trajectory_length_on_policy_step": 1.0,
+            "average_trajectory_length_on_policy_running_sum": 4.0,
+            "average_trajectory_length_on_policy_running_mean": 1.0,
+            "average_trajectory_length_on_policy_weight_sum": 4.0,
+            "novelty_fraction_on_policy_step": 0.25,
+            "novelty_fraction_on_policy_running_sum": 1.0,
+            "novelty_fraction_on_policy_running_mean": 0.25,
+            "novelty_fraction_on_policy_weight_sum": 4.0,
+        }
+    ]
+    assert report_appendix_calls == [
+        {
+            "average_prefix_reward_step": 5.0,
+            "average_prefix_reward_running_sum": 10.0,
+            "average_prefix_reward_running_mean": 5.0,
+            "average_prefix_reward_weight_sum": 2.0,
+            "average_valid_prefix_step": 0.5,
+            "average_valid_prefix_running_sum": 1.0,
+            "average_valid_prefix_running_mean": 0.5,
+            "average_valid_prefix_weight_sum": 2.0,
+            "average_training_reward_step": 3.0,
+            "average_training_reward_running_sum": 24.0,
+            "average_training_reward_running_mean": 3.0,
+            "average_training_reward_weight_sum": 8.0,
+            "duplicate_count_on_policy_step": 1.0,
+            "duplicate_count_on_policy_running_sum": 1.0,
+            "num_novel_on_policy_step": 1.0,
+            "num_novel_on_policy_running_sum": 1.0,
+            "num_novel_on_policy_running_mean": 1.0,
+            "num_novel_on_policy_weight_sum": 1.0,
+            "num_valid_on_policy_for_novelty_step": 4.0,
+            "num_valid_on_policy_for_novelty_running_sum": 4.0,
+            "num_valid_on_policy_for_novelty_running_mean": 4.0,
+            "num_valid_on_policy_for_novelty_weight_sum": 1.0,
+            "gradient_norm_step": 0.5,
+            "gradient_norm_running_sum": 0.5,
+            "gradient_norm_running_mean": 0.5,
+            "gradient_norm_weight_sum": 1.0,
+            "termination_fraction_stop_token_step": 0.75,
+            "termination_fraction_stop_token_running_sum": 3.0,
+            "termination_fraction_stop_token_running_mean": 0.75,
+            "termination_fraction_stop_token_weight_sum": 4.0,
+            "termination_fraction_max_stage_new_tokens_step": 0.25,
+            "termination_fraction_max_stage_new_tokens_running_sum": 1.0,
+            "termination_fraction_max_stage_new_tokens_running_mean": 0.25,
+            "termination_fraction_max_stage_new_tokens_weight_sum": 4.0,
+            "iteration_duration_sec_step": 2.0,
+            "iteration_duration_sec_running_sum": 2.0,
+            "iteration_duration_sec_running_mean": 2.0,
+            "iteration_duration_sec_weight_sum": 1.0,
+        }
+    ]
+    assert "duplicate_fraction_step" not in report_appendix_calls[0]
     assert categorized_calls == {
         "gflownet_diagnostics_stage_rollout": {
             "mean_trajectory_length": 1.0,
@@ -859,9 +1358,11 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
     diagnostics_dir = output_dir / "diagnostics"
     iteration_diagnostics = diagnostics_dir / "iteration_diagnostics.jsonl"
     iteration_diagnostics_categorized = diagnostics_dir / "iteration_diagnostics_categorized.jsonl"
+    report_metrics = diagnostics_dir / "gflownet_report_metrics.jsonl"
     trajectory_previews = diagnostics_dir / "trajectory_previews.jsonl"
     assert iteration_diagnostics.exists()
     assert iteration_diagnostics_categorized.exists()
+    assert report_metrics.exists()
     assert trajectory_previews.exists()
     assert [json.loads(line) for line in iteration_diagnostics.read_text().splitlines()] == [
         {
@@ -887,6 +1388,13 @@ def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_mod
                     "grad_norm": 0.5,
                 },
             },
+        }
+    ]
+    assert [json.loads(line) for line in report_metrics.read_text().splitlines()] == [
+        {
+            "iteration": 1.0,
+            "main": report_calls[0],
+            "appendix": report_appendix_calls[0],
         }
     ]
     assert [json.loads(line) for line in trajectory_previews.read_text().splitlines()] == [

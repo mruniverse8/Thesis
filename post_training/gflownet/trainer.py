@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import json
 from pathlib import Path
 import random
@@ -30,6 +31,7 @@ from post_training.sft_multi.dataset import MultiMoleculeDataset
 
 from .buffer import OnPolicyBatch, ReplaySampleBatch, build_replay_buffer
 from .checkpointing import (
+    append_gflownet_report_metrics,
     append_iteration_diagnostics,
     append_iteration_diagnostics_categorized,
     append_trajectory_previews,
@@ -40,9 +42,11 @@ from .checkpointing import (
 )
 from .config import GFlowNetConfig, build_gflownet_config
 from .diagnostics import (
+    GFlowNetReportAccumulator,
     GFlowNetTrainIterationResult,
     all_finite,
     build_trajectory_preview_payload,
+    on_policy_novelty_metrics,
     rollout_stage_metrics,
     safe_rate,
     stack_scalar_likes,
@@ -114,6 +118,58 @@ def _compute_target_guided_target_count(
     if off_policy_fraction <= 0.0:
         return 0
     return max(0, int(round(anchor_count * source_fraction / off_policy_fraction)))
+
+
+@dataclass
+class EpochBatchSampler:
+    dataset: MultiMoleculeDataset
+    batch_size: int
+    rng: random.Random
+
+    def __post_init__(self) -> None:
+        self.batch_size = max(1, int(self.batch_size))
+        self.indices = list(range(len(self.dataset)))
+        self.cursor = 0
+        self.epoch = 0
+        self._start_next_epoch()
+
+    def _start_next_epoch(self) -> None:
+        self.rng.shuffle(self.indices)
+        self.cursor = 0
+        self.epoch += 1
+
+    def next_batch(self) -> tuple[list[dict[str, object]], int]:
+        if not self.indices:
+            return [], self.epoch
+
+        if self.cursor >= len(self.indices):
+            self._start_next_epoch()
+
+        end = min(self.cursor + self.batch_size, len(self.indices))
+        batch_indices = self.indices[self.cursor:end]
+        self.cursor = end
+
+        return [self.dataset[index] for index in batch_indices], self.epoch
+
+
+def _select_optimization_trajectories(
+    *,
+    target_teacher_trajectories: Sequence[SampledStageTrajectory],
+    on_policy_trajectories: Sequence[SampledStageTrajectory],
+    target_prefix_trajectories: Sequence[SampledStageTrajectory],
+    replay_trajectories: Sequence[SampledStageTrajectory],
+    max_optimization_trajectories_per_iter: int | None,
+) -> tuple[list[SampledStageTrajectory], list[SampledStageTrajectory]]:
+    optimization_candidates = [
+        *target_teacher_trajectories,
+        *on_policy_trajectories,
+        *target_prefix_trajectories,
+        *replay_trajectories,
+    ]
+    if max_optimization_trajectories_per_iter is None:
+        return optimization_candidates, optimization_candidates
+    max_trajectories = max(0, int(max_optimization_trajectories_per_iter))
+    return optimization_candidates, optimization_candidates[:max_trajectories]
 
 
 class MultiMoleculeGFlowNetTrainer:
@@ -413,6 +469,10 @@ class MultiMoleculeGFlowNetTrainer:
         on_policy_trimmed_count = len(raw_on_policy_trajectories) - len(on_policy_trajectories)
         sampling_duration_sec = perf_counter() - sampling_start
         on_policy_batch = OnPolicyBatch.from_trajectories(on_policy_trajectories)
+        duplicate_count_on_policy = sum(
+            int(trajectory.is_duplicate) for trajectory in on_policy_trajectories
+        )
+        novelty_metrics = on_policy_novelty_metrics(on_policy_trajectories)
 
         replay_sample = ReplaySampleBatch(())
         replay_trajectories: list[SampledStageTrajectory] = []
@@ -476,12 +536,31 @@ class MultiMoleculeGFlowNetTrainer:
             if self.replay_buffer is not None:
                 self.replay_buffer.extend(on_policy_trajectories)
 
-        optimization_trajectories = [
-            *on_policy_trajectories,
-            *target_prefix_trajectories,
-            *target_teacher_trajectories,
-            *replay_trajectories,
-        ]
+        max_optimization_trajectories_per_iter = (
+            self.config.max_optimization_trajectories_per_iter
+        )
+        optimization_candidates, optimization_trajectories = _select_optimization_trajectories(
+            target_teacher_trajectories=target_teacher_trajectories,
+            on_policy_trajectories=on_policy_trajectories,
+            target_prefix_trajectories=target_prefix_trajectories,
+            replay_trajectories=replay_trajectories,
+            max_optimization_trajectories_per_iter=(
+                max_optimization_trajectories_per_iter
+            ),
+        )
+        optimization_trimmed_count = len(optimization_candidates) - len(
+            optimization_trajectories
+        )
+        retained_replay_count = min(
+            len(replay_trajectories),
+            max(
+                0,
+                len(optimization_trajectories)
+                - len(target_teacher_trajectories)
+                - len(on_policy_trajectories)
+                - len(target_prefix_trajectories),
+            ),
+        )
         target_prefix_batch = OnPolicyBatch.from_trajectories(target_prefix_trajectories)
         target_teacher_batch = OnPolicyBatch.from_trajectories(target_teacher_trajectories)
 
@@ -490,13 +569,46 @@ class MultiMoleculeGFlowNetTrainer:
             metrics: dict[str, Any] = {
                 "iteration": float(iteration_index),
                 "learning_rate": float(self.optimizer.param_groups[0]["lr"]),
+                "objective_loss": 0.0,
+                "mean_stage_reward": on_policy_batch.mean_stage_reward(),
+                "stage_reward_std": _tensor_std(
+                    torch.tensor(
+                        [trajectory.terminal_reward for trajectory in on_policy_trajectories],
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                ),
+                "mean_training_stage_reward": 0.0,
+                "training_stage_reward_std": 0.0,
+                "valid_fraction": on_policy_batch.valid_fraction(),
+                "duplicate_fraction": on_policy_batch.duplicate_fraction(),
+                "duplicate_count_on_policy": float(duplicate_count_on_policy),
+                "mean_num_actions": on_policy_batch.mean_num_actions(),
+                "max_num_actions": float(
+                    max(
+                        (
+                            trajectory.num_actions
+                            for trajectory in on_policy_trajectories
+                        ),
+                        default=0,
+                    )
+                ),
+                "mean_stage_index": on_policy_batch.mean_stage_index(),
                 "num_on_policy_trajectories": float(len(on_policy_trajectories)),
                 "num_on_policy_trajectories_raw": float(len(raw_on_policy_trajectories)),
                 "num_on_policy_trajectories_trimmed": float(on_policy_trimmed_count),
-                "num_target_prefix_trajectories": 0.0,
-                "num_target_teacher_trajectories": 0.0,
-                "num_target_guided_trajectories": 0.0,
-                "num_replay_trajectories": 0.0,
+                "num_optimization_trajectories_raw": float(len(optimization_candidates)),
+                "num_optimization_trajectories": float(len(optimization_trajectories)),
+                "num_optimization_trajectories_trimmed": float(optimization_trimmed_count),
+                "max_optimization_trajectories_per_iter": float(
+                    max_optimization_trajectories_per_iter or 0
+                ),
+                "num_target_prefix_trajectories": float(len(target_prefix_trajectories)),
+                "num_target_teacher_trajectories": float(len(target_teacher_trajectories)),
+                "num_target_guided_trajectories": float(
+                    len(target_prefix_trajectories) + len(target_teacher_trajectories)
+                ),
+                "num_replay_trajectories": float(len(replay_trajectories)),
                 "target_guidance_on_policy_fraction": (
                     float(self.config.target_guidance.on_policy_fraction)
                     if self.config.target_guidance.enabled
@@ -512,10 +624,10 @@ class MultiMoleculeGFlowNetTrainer:
                     if self.config.target_guidance.enabled
                     else 0.0
                 ),
-                "target_prefix_valid_fraction": 0.0,
-                "target_teacher_valid_fraction": 0.0,
-                "target_prefix_mean_stage_reward": 0.0,
-                "target_teacher_mean_stage_reward": 0.0,
+                "target_prefix_valid_fraction": target_prefix_batch.valid_fraction(),
+                "target_teacher_valid_fraction": target_teacher_batch.valid_fraction(),
+                "target_prefix_mean_stage_reward": target_prefix_batch.mean_stage_reward(),
+                "target_teacher_mean_stage_reward": target_teacher_batch.mean_stage_reward(),
                 "configured_replay_fraction": (
                     float(self.config.replay.replay_fraction or 0.0)
                     if self.replay_buffer is not None
@@ -527,18 +639,21 @@ class MultiMoleculeGFlowNetTrainer:
                     if self.replay_buffer is not None
                     else "disabled"
                 ),
-                "replay_recent_count": 0.0,
-                "replay_reward_count": 0.0,
-                "replay_uniform_count": 0.0,
-                "replay_tb_residual_count": 0.0,
+                "replay_recent_count": float(replay_sample.source_counts.get("recent", 0)),
+                "replay_reward_count": float(replay_sample.source_counts.get("reward", 0)),
+                "replay_uniform_count": float(replay_sample.source_counts.get("uniform", 0)),
+                "replay_tb_residual_count": float(
+                    replay_sample.source_counts.get("tb_residual", 0)
+                ),
                 "replay_size": float(len(self.replay_buffer) if self.replay_buffer is not None else 0),
                 "replay_total_action_tokens": float(
                     self.replay_buffer.total_action_tokens if self.replay_buffer is not None else 0
                 ),
                 "rollout_append_probability": float(self.config.rollout.append_probability),
                 "rollout_return_last_valid_trajectory_only": float(self.config.objective == "subtb"),
+                "grad_norm": 0.0,
                 "sampling_duration_sec": sampling_duration_sec,
-                "replay_sampling_duration_sec": 0.0,
+                "replay_sampling_duration_sec": replay_sampling_duration_sec,
                 "target_guidance_sampling_duration_sec": target_guidance_sampling_duration_sec,
                 "scoring_duration_sec": 0.0,
                 "loss_duration_sec": 0.0,
@@ -550,6 +665,7 @@ class MultiMoleculeGFlowNetTrainer:
                 "trajectories_per_sec": 0.0,
                 "action_tokens_per_sec": 0.0,
                 "all_finite": True,
+                **novelty_metrics,
                 **termination_reason_metrics(on_policy_trajectories),
                 **rollout_stage_metrics(
                     on_policy_trajectories,
@@ -653,12 +769,19 @@ class MultiMoleculeGFlowNetTrainer:
             "training_stage_reward_std": _tensor_std(optimization_rewards),
             "valid_fraction": on_policy_batch.valid_fraction(),
             "duplicate_fraction": on_policy_batch.duplicate_fraction(),
+            "duplicate_count_on_policy": float(duplicate_count_on_policy),
             "mean_num_actions": on_policy_batch.mean_num_actions(),
             "max_num_actions": float(action_counts.max().item()) if action_counts.numel() > 0 else 0.0,
             "mean_stage_index": on_policy_batch.mean_stage_index(),
             "num_on_policy_trajectories": float(len(on_policy_trajectories)),
             "num_on_policy_trajectories_raw": float(len(raw_on_policy_trajectories)),
             "num_on_policy_trajectories_trimmed": float(on_policy_trimmed_count),
+            "num_optimization_trajectories_raw": float(len(optimization_candidates)),
+            "num_optimization_trajectories": float(len(optimization_trajectories)),
+            "num_optimization_trajectories_trimmed": float(optimization_trimmed_count),
+            "max_optimization_trajectories_per_iter": float(
+                max_optimization_trajectories_per_iter or 0
+            ),
             "num_target_prefix_trajectories": float(len(target_prefix_trajectories)),
             "num_target_teacher_trajectories": float(len(target_teacher_trajectories)),
             "num_target_guided_trajectories": float(
@@ -690,7 +813,7 @@ class MultiMoleculeGFlowNetTrainer:
                 else 0.0
             ),
             "replay_fraction": float(
-                len(replay_trajectories) / len(optimization_trajectories)
+                retained_replay_count / len(optimization_trajectories)
                 if optimization_trajectories
                 else 0.0
             ),
@@ -745,6 +868,7 @@ class MultiMoleculeGFlowNetTrainer:
                 *gradient_tensors,
             ),
             **diagnostics,
+            **novelty_metrics,
             **termination_reason_metrics(on_policy_trajectories),
             **rollout_stage_metrics(
                 on_policy_trajectories,
@@ -844,11 +968,6 @@ class MultiMoleculeGFlowNetTrainer:
         self.best_checkpoint_dir = str(checkpoint_dir)
         self.best_checkpoint_zip = str(checkpoint_zip) if checkpoint_zip is not None else None
         return checkpoint_dir
-
-
-def sample_examples(dataset: MultiMoleculeDataset, count: int) -> list[dict[str, object]]:
-    return [dataset[random.randrange(len(dataset))] for _ in range(count)]
-
 
 def _build_gflownet_tracking_config_payload(
     config: dict[str, object],
@@ -967,12 +1086,20 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
             _build_gflownet_tracking_config_payload(config, output_dir=str(output_dir))
         )
 
+        sampler = EpochBatchSampler(
+            train_dataset,
+            batch_size=gflownet_config.batch_size,
+            rng=random.Random(gflownet_config.seed),
+        )
+        report_accumulator = GFlowNetReportAccumulator()
         for iteration in range(1, gflownet_config.gflownet_iterations + 1):
-            iteration_examples = sample_examples(train_dataset, gflownet_config.batch_size)
+            iteration_examples, epoch_index = sampler.next_batch()
             iteration_result = trainer.train_iteration(
                 iteration_examples,
                 iteration_index=iteration,
             )
+            iteration_result.metrics["epoch"] = float(epoch_index)
+            report_record = report_accumulator.update(iteration_result.metrics)
             history.append(iteration_result.metrics)
             write_gflownet_history(output_dir, history)
             tracker.log_metrics(
@@ -980,6 +1107,17 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
                 step=iteration,
                 prefix="gflownet",
             )
+            tracker.log_metrics(
+                report_record["main"],
+                step=iteration,
+                prefix="gflownet_report",
+            )
+            tracker.log_metrics(
+                report_record["appendix"],
+                step=iteration,
+                prefix="gflownet_report_appendix",
+            )
+            append_gflownet_report_metrics(output_dir, [report_record])
             if iteration_result.diagnostic_metrics is not None:
                 append_iteration_diagnostics(
                     output_dir,

@@ -65,6 +65,15 @@ def append_trajectory_previews(
     return diagnostics_path
 
 
+def append_gflownet_report_metrics(
+    output_dir: str | Path,
+    records: Sequence[dict[str, Any]],
+) -> Path:
+    diagnostics_path = Path(output_dir) / "diagnostics" / "gflownet_report_metrics.jsonl"
+    _append_jsonl(diagnostics_path, records)
+    return diagnostics_path
+
+
 def save_gflownet_checkpoint_artifacts(
     *,
     checkpoint_dir: str | Path,

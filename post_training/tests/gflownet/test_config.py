@@ -17,7 +17,9 @@ from src.io_utils import load_yaml
 def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -> None:
     config = GFlowNetConfig.from_dict(
         {
+            "seed": 99,
             "objective": "db",
+            "max_optimization_trajectories_per_iter": 16,
             "diagnostic_log_every_iterations": 12,
             "trajectory_preview_every_iterations": 8,
             "trajectory_preview_num_samples": 5,
@@ -57,7 +59,9 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
         }
     )
 
+    assert config.seed == 99
     assert config.objective == "db"
+    assert config.max_optimization_trajectories_per_iter == 16
     assert config.diagnostic_log_every_iterations == 12
     assert config.trajectory_preview_every_iterations == 8
     assert config.trajectory_preview_num_samples == 5
@@ -90,7 +94,15 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.target_guidance.teacher_stage_strategy == "random"
     assert config.target_guidance.prefix_stage_strategy == "random"
     assert config.target_guidance.shuffle_target_selfies_list is True
+    assert config.to_dict()["max_optimization_trajectories_per_iter"] == 16
     assert config.to_dict()["target_guidance"]["shuffle_target_selfies_list"] is True
+
+
+def test_gflownet_config_defaults_to_uncapped_optimization_trajectories() -> None:
+    config = GFlowNetConfig.from_dict({"max_optimization_trajectories_per_iter": None})
+
+    assert config.max_optimization_trajectories_per_iter is None
+    assert config.to_dict()["max_optimization_trajectories_per_iter"] is None
 
 
 def test_target_guidance_config_rejects_invalid_fraction_sum() -> None:
@@ -207,6 +219,7 @@ def test_build_gflownet_config_uses_training_and_model_defaults() -> None:
     )
 
     assert config.output_dir == "outputs/gflownet"
+    assert config.seed == 42
     assert config.use_lora is False
     assert config.batch_size == 32
     assert config.rollout.max_source_length == 384

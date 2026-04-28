@@ -3,7 +3,9 @@ import pytest
 from src.constants import EOM_TOKEN
 
 from post_training.gflownet.diagnostics import (
+    GFlowNetReportAccumulator,
     build_trajectory_preview_payload,
+    on_policy_novelty_metrics,
     rollout_stage_metrics,
     termination_reason_metrics,
 )
@@ -19,6 +21,8 @@ def _make_sampled_trajectory(
     is_valid: bool = True,
     action_token_ids: tuple[int, ...] = (1, 2),
     target_selfies_list: tuple[str, ...] = ("[C][C][O]",),
+    sampled_selfies: str | None = "[C][C][O]",
+    is_duplicate: bool = False,
     metadata: dict[str, object] | None = None,
 ) -> SampledStageTrajectory:
     return SampledStageTrajectory(
@@ -31,7 +35,7 @@ def _make_sampled_trajectory(
         decoder_prefix_text="",
         previous_sampled_selfies=(),
         stage_text="<bom>[C][C][O]<eom>",
-        sampled_selfies="[C][C][O]" if is_valid else None,
+        sampled_selfies=sampled_selfies if is_valid else None,
         action_token_ids=action_token_ids,
         reward_breakdown={"amplified_reward": terminal_reward},
         prefix_rewards=tuple([1.0e-4] * len(action_token_ids) + [terminal_reward]),
@@ -39,7 +43,7 @@ def _make_sampled_trajectory(
         stop_token=EOM_TOKEN,
         termination_reason=termination_reason,
         is_valid=is_valid,
-        is_duplicate=False,
+        is_duplicate=is_duplicate,
         metadata=dict(metadata or {}),
     )
 
@@ -66,6 +70,127 @@ def test_termination_reason_metrics_supports_custom_prefix() -> None:
     assert metrics["stage1_termination_fraction_stop_token"] == pytest.approx(0.5)
     assert metrics["stage1_termination_fraction_max_stage_new_tokens"] == pytest.approx(0.5)
     assert metrics["stage1_termination_fraction_eos_token"] == pytest.approx(0.0)
+
+
+def test_gflownet_report_accumulator_uses_weighted_running_means() -> None:
+    accumulator = GFlowNetReportAccumulator()
+
+    first = accumulator.update(
+        {
+            "iteration": 1.0,
+            "objective_loss": 1.0,
+            "mean_stage_reward": 2.0,
+            "num_on_policy_trajectories": 2.0,
+            "target_teacher_mean_stage_reward": 10.0,
+            "num_target_teacher_trajectories": 1.0,
+            "valid_fraction": 0.5,
+            "target_teacher_valid_fraction": 1.0,
+            "mean_trajectory_length": 1.5,
+            "num_rollouts": 2.0,
+            "novelty_fraction_on_policy": 0.25,
+            "num_valid_on_policy_for_novelty": 4.0,
+            "target_prefix_mean_stage_reward": 5.0,
+            "num_target_prefix_trajectories": 2.0,
+            "target_prefix_valid_fraction": 0.5,
+            "mean_training_stage_reward": 3.0,
+            "num_optimization_trajectories": 3.0,
+            "duplicate_count_on_policy": 0.0,
+            "num_novel_on_policy": 1.0,
+            "grad_norm": 2.0,
+            "termination_fraction_stop_token": 0.5,
+            "termination_fraction_max_stage_new_tokens": 0.5,
+            "iteration_duration_sec": 4.0,
+        }
+    )
+    second = accumulator.update(
+        {
+            "iteration": 2.0,
+            "objective_loss": 3.0,
+            "mean_stage_reward": 6.0,
+            "num_on_policy_trajectories": 1.0,
+            "target_teacher_mean_stage_reward": 2.0,
+            "num_target_teacher_trajectories": 3.0,
+            "valid_fraction": 1.0,
+            "target_teacher_valid_fraction": 1.0 / 3.0,
+            "mean_trajectory_length": 3.0,
+            "num_rollouts": 1.0,
+            "novelty_fraction_on_policy": 0.5,
+            "num_valid_on_policy_for_novelty": 2.0,
+            "target_prefix_mean_stage_reward": 1.0,
+            "num_target_prefix_trajectories": 2.0,
+            "target_prefix_valid_fraction": 1.0,
+            "mean_training_stage_reward": 7.0,
+            "num_optimization_trajectories": 1.0,
+            "duplicate_count_on_policy": 0.0,
+            "num_novel_on_policy": 1.0,
+            "grad_norm": 6.0,
+            "termination_fraction_stop_token": 1.0,
+            "termination_fraction_max_stage_new_tokens": 0.0,
+            "iteration_duration_sec": 8.0,
+        }
+    )
+
+    assert first["main"]["average_on_policy_reward_running_mean"] == pytest.approx(2.0)
+    assert second["main"]["average_on_policy_reward_running_sum"] == pytest.approx(10.0)
+    assert second["main"]["average_on_policy_reward_weight_sum"] == pytest.approx(3.0)
+    assert second["main"]["average_on_policy_reward_running_mean"] == pytest.approx(10.0 / 3.0)
+    assert second["main"]["loss_function_running_sum"] == pytest.approx(4.0)
+    assert second["main"]["loss_function_weight_sum"] == pytest.approx(2.0)
+    assert second["main"]["loss_function_running_mean"] == pytest.approx(2.0)
+    assert second["main"]["novelty_fraction_on_policy_running_sum"] == pytest.approx(2.0)
+    assert second["main"]["novelty_fraction_on_policy_weight_sum"] == pytest.approx(6.0)
+    assert second["main"]["novelty_fraction_on_policy_running_mean"] == pytest.approx(1.0 / 3.0)
+    assert second["appendix"]["termination_fraction_stop_token_running_sum"] == pytest.approx(2.0)
+    assert second["appendix"]["termination_fraction_stop_token_weight_sum"] == pytest.approx(3.0)
+    assert second["appendix"]["termination_fraction_stop_token_running_mean"] == pytest.approx(2.0 / 3.0)
+    assert second["appendix"]["gradient_norm_running_mean"] == pytest.approx(4.0)
+
+
+def test_gflownet_report_accumulator_tracks_cumulative_duplicate_count() -> None:
+    accumulator = GFlowNetReportAccumulator()
+
+    first = accumulator.update({"iteration": 1.0, "duplicate_count_on_policy": 2.0})
+    second = accumulator.update({"iteration": 2.0, "duplicate_count_on_policy": 3.0})
+
+    assert first["appendix"]["duplicate_count_on_policy_step"] == pytest.approx(2.0)
+    assert first["appendix"]["duplicate_count_on_policy_running_sum"] == pytest.approx(2.0)
+    assert second["appendix"]["duplicate_count_on_policy_step"] == pytest.approx(3.0)
+    assert second["appendix"]["duplicate_count_on_policy_running_sum"] == pytest.approx(5.0)
+    assert "duplicate_count_on_policy_running_mean" not in second["appendix"]
+    assert "duplicate_count_on_policy_weight_sum" not in second["appendix"]
+
+
+def test_on_policy_novelty_metrics_compare_valid_generated_to_targets() -> None:
+    trajectories = (
+        _make_sampled_trajectory(
+            rollout_id="copied-target",
+            stage_index=1,
+            terminal_reward=2.0,
+            target_selfies_list=("[C][C][O]", "[C][N]"),
+            sampled_selfies="[C][C][O]",
+        ),
+        _make_sampled_trajectory(
+            rollout_id="novel-valid",
+            stage_index=1,
+            terminal_reward=3.0,
+            target_selfies_list=("[C][C][O]",),
+            sampled_selfies="[C][N]",
+        ),
+        _make_sampled_trajectory(
+            rollout_id="invalid",
+            stage_index=1,
+            terminal_reward=1.0e-4,
+            target_selfies_list=("[C][C][O]",),
+            sampled_selfies=None,
+            is_valid=False,
+        ),
+    )
+
+    metrics = on_policy_novelty_metrics(trajectories)
+
+    assert metrics["num_valid_on_policy_for_novelty"] == pytest.approx(2.0)
+    assert metrics["num_novel_on_policy"] == pytest.approx(1.0)
+    assert metrics["novelty_fraction_on_policy"] == pytest.approx(0.5)
 
 
 def test_rollout_stage_metrics_capture_realized_lengths_and_stage_split_breakdown() -> None:

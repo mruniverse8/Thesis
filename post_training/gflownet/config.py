@@ -76,8 +76,10 @@ class TargetGuidanceConfig:
 @dataclass(frozen=True)
 class GFlowNetConfig:
     output_dir: str = "outputs/post_training_gflownet"
+    seed: int = 42
     gflownet_iterations: int = 200
     batch_size: int = 64
+    max_optimization_trajectories_per_iter: int | None = None
     objective: str = "tb"
     learning_rate: float = 5.0e-5
     max_grad_norm: float = 1.0
@@ -106,6 +108,15 @@ class GFlowNetConfig:
         objective = str(payload.get("objective", cls.objective)).strip().lower()
         if objective not in {"tb", "db", "subtb"}:
             raise ValueError("objective must be one of: tb, db, subtb.")
+        max_optimization_trajectories_per_iter = payload.get(
+            "max_optimization_trajectories_per_iter",
+            cls.max_optimization_trajectories_per_iter,
+        )
+        if max_optimization_trajectories_per_iter is not None:
+            max_optimization_trajectories_per_iter = max(
+                1,
+                int(max_optimization_trajectories_per_iter),
+            )
         decoding_strategy = str(
             rollout_payload.get(
                 "decoding_strategy",
@@ -148,10 +159,14 @@ class GFlowNetConfig:
             )
         return cls(
             output_dir=str(payload.get("output_dir", cls.output_dir)),
+            seed=int(payload.get("seed", cls.seed)),
             gflownet_iterations=int(
                 payload.get("gflownet_iterations", cls.gflownet_iterations)
             ),
             batch_size=max(1, int(payload.get("batch_size", cls.batch_size))),
+            max_optimization_trajectories_per_iter=(
+                max_optimization_trajectories_per_iter
+            ),
             objective=objective,
             learning_rate=float(payload.get("learning_rate", cls.learning_rate)),
             max_grad_norm=float(payload.get("max_grad_norm", cls.max_grad_norm)),
@@ -488,6 +503,8 @@ def build_gflownet_config(config: dict[str, Any]) -> GFlowNetConfig:
     training_config = config.get("training", {})
     model_config = config.get("model", {})
 
+    if "seed" not in gflownet_payload and "seed" in config:
+        gflownet_payload["seed"] = config["seed"]
     gflownet_payload.setdefault("output_dir", training_config["output_dir"])
     gflownet_payload.setdefault(
         "save_every_iterations",

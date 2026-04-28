@@ -35,6 +35,10 @@ _VALIDITY_METRIC_KEYS = frozenset(
     {
         "valid_fraction",
         "duplicate_fraction",
+        "duplicate_count_on_policy",
+        "novelty_fraction_on_policy",
+        "num_novel_on_policy",
+        "num_valid_on_policy_for_novelty",
         "valid_rate",
         "duplicate_rate",
     }
@@ -80,6 +84,10 @@ _OPTIMIZER_METRIC_KEYS = frozenset(
         "replay_tb_residual_count",
         "replay_size",
         "replay_total_action_tokens",
+        "num_optimization_trajectories_raw",
+        "num_optimization_trajectories",
+        "num_optimization_trajectories_trimmed",
+        "max_optimization_trajectories_per_iter",
         "mean_log_pf_token",
         "mean_log_pb_token",
         "mean_log_state_flow",
