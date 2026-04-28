@@ -774,13 +774,16 @@ def sample_stage(
     resolved_constraints = resolve_stage_token_constraints(model, stage_token_constraints)
 
     current_decoder_input_ids = decoder_prefix_ids.clone()
+    past_key_values = None
     raw_action_token_ids: list[int] = []
     stop_token: str | None = None
     termination_reason = "max_stage_new_tokens"
+    source_length = attention_mask.size(1)
+    decoder_prefix_length = decoder_prefix_ids.size(1)
 
     with torch.no_grad():
         for _ in range(generation_config.max_stage_new_tokens):
-            total_length = input_ids.size(1) + current_decoder_input_ids.size(1)
+            total_length = source_length + decoder_prefix_length + len(raw_action_token_ids)
             if total_length >= generation_config.max_sequence_length:
                 termination_reason = "max_sequence_length"
                 break
@@ -788,8 +791,11 @@ def sample_stage(
             outputs = model.policy_model(
                 **_policy_model_prompt_kwargs(input_ids, attention_mask, encoder_cache),
                 decoder_input_ids=current_decoder_input_ids,
+                past_key_values=past_key_values,
+                use_cache=True,
                 return_dict=True,
             )
+            past_key_values = outputs.past_key_values
             next_logits = outputs.logits[:, -1, :]
             next_token, _, _ = sample_next_token(
                 next_logits,
@@ -811,7 +817,7 @@ def sample_stage(
                 break
 
             raw_action_token_ids.append(next_token_id)
-            current_decoder_input_ids = torch.cat([current_decoder_input_ids, next_token], dim=1)
+            current_decoder_input_ids = next_token
 
     return _build_stage_sample_from_generation(
         tokenizer,

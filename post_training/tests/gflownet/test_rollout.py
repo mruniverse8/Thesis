@@ -106,6 +106,9 @@ class PrefixLogitPolicyModel:
         self.logits_by_action_prefix = logits_by_action_prefix
         self.config = SimpleNamespace(eos_token_id=eos_token_id)
         self.calls: list[tuple[int, ...]] = []
+        self.decoder_input_lengths: list[int] = []
+        self.past_key_values_seen: list[object] = []
+        self.use_cache_flags: list[bool] = []
         self.vocab_size = vocab_size
 
     def __call__(
@@ -115,16 +118,29 @@ class PrefixLogitPolicyModel:
         attention_mask: torch.Tensor | None = None,
         encoder_outputs=None,
         decoder_input_ids: torch.Tensor,
+        past_key_values=None,
+        use_cache: bool = False,
         return_dict: bool,
         **kwargs,
     ) -> SimpleNamespace:
         del input_ids, attention_mask, encoder_outputs, return_dict, kwargs
-        action_prefix = tuple(int(token_id) for token_id in decoder_input_ids[0, 1:].tolist())
+        if past_key_values is None:
+            action_prefix = tuple(int(token_id) for token_id in decoder_input_ids[0, 1:].tolist())
+        else:
+            action_prefix = tuple(int(token_id) for token_id in past_key_values) + tuple(
+                int(token_id) for token_id in decoder_input_ids[0].tolist()
+            )
         self.calls.append(action_prefix)
+        self.decoder_input_lengths.append(int(decoder_input_ids.size(1)))
+        self.past_key_values_seen.append(past_key_values)
+        self.use_cache_flags.append(bool(use_cache))
         logits = torch.full((1, decoder_input_ids.size(1), self.vocab_size), -20.0)
         for token_id, score in self.logits_by_action_prefix.get(action_prefix, {}).items():
             logits[:, -1, int(token_id)] = float(score)
-        return SimpleNamespace(logits=logits)
+        return SimpleNamespace(
+            logits=logits,
+            past_key_values=action_prefix if use_cache else None,
+        )
 
 
 class PrefixLogitModel:
@@ -1440,19 +1456,29 @@ def test_sample_stage_keeps_raw_action_ids_when_projection_is_invalid() -> None:
         def __call__(
             self,
             *,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            encoder_outputs=None,
             decoder_input_ids: torch.Tensor,
+            past_key_values=None,
+            use_cache: bool = False,
             return_dict: bool,
+            **kwargs,
         ) -> SimpleNamespace:
-            del input_ids, attention_mask, return_dict
+            del input_ids, attention_mask, encoder_outputs, return_dict, kwargs
+            past_tokens = tuple(int(token_id) for token_id in (past_key_values or ()))
+            decoder_tokens = tuple(int(token_id) for token_id in decoder_input_ids[0].tolist())
+            cached_decoder_tokens = past_tokens + decoder_tokens
             logits = torch.full((1, decoder_input_ids.size(1), 8), -20.0)
-            current_length = decoder_input_ids.size(1)
+            current_length = len(cached_decoder_tokens)
             if current_length == 1:
                 logits[:, -1, 1] = 10.0
             else:
                 logits[:, -1, 2] = 10.0
-            return SimpleNamespace(logits=logits)
+            return SimpleNamespace(
+                logits=logits,
+                past_key_values=cached_decoder_tokens if use_cache else None,
+            )
 
     class DummyModel:
         def __init__(self) -> None:
@@ -1504,14 +1530,21 @@ def test_sample_stage_enforces_bom_and_masks_language_tokens() -> None:
         def __call__(
             self,
             *,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            encoder_outputs=None,
             decoder_input_ids: torch.Tensor,
+            past_key_values=None,
+            use_cache: bool = False,
             return_dict: bool,
+            **kwargs,
         ) -> SimpleNamespace:
-            del input_ids, attention_mask, return_dict
+            del input_ids, attention_mask, encoder_outputs, return_dict, kwargs
+            past_tokens = tuple(int(token_id) for token_id in (past_key_values or ()))
+            decoder_tokens = tuple(int(token_id) for token_id in decoder_input_ids[0].tolist())
+            cached_decoder_tokens = past_tokens + decoder_tokens
             logits = torch.full((1, decoder_input_ids.size(1), 8), -20.0)
-            current_length = decoder_input_ids.size(1)
+            current_length = len(cached_decoder_tokens)
             if current_length == 1:
                 logits[:, -1, 4] = 10.0
                 logits[:, -1, 1] = 0.0
@@ -1522,7 +1555,10 @@ def test_sample_stage_enforces_bom_and_masks_language_tokens() -> None:
                 logits[:, -1, 4] = 10.0
                 logits[:, -1, 3] = 6.0
                 logits[:, -1, 2] = 0.0
-            return SimpleNamespace(logits=logits)
+            return SimpleNamespace(
+                logits=logits,
+                past_key_values=cached_decoder_tokens if use_cache else None,
+            )
 
     class DummyModel:
         def __init__(self) -> None:
@@ -1944,6 +1980,50 @@ def test_sample_stage_explicit_sample_strategy_preserves_sampling_path() -> None
     assert "beam_score" not in stage_sample["metadata"]
 
 
+def test_sample_stage_sample_strategy_uses_kv_cache_after_prefix() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C]",
+            3: "<eom>",
+        },
+        {
+            "<bom>": 1,
+            "[C]": 2,
+            EOM_TOKEN: 3,
+        },
+    )
+    model = PrefixLogitModel(
+        {
+            (7, 8): {1: 8.0},
+            (7, 8, 1): {2: 8.0},
+            (7, 8, 1, 2): {3: 8.0},
+        },
+        vocab_size=10,
+    )
+
+    stage_sample = sample_stage(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[1, 2]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 1]], dtype=torch.long),
+        decoder_prefix_ids=torch.tensor([[0, 7, 8]], dtype=torch.long),
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="sample",
+            num_beams=1,
+            max_stage_new_tokens=4,
+            top_p=1.0,
+        ),
+    )
+
+    assert stage_sample["stage_text"] == "<bom>[C]<eom>"
+    assert stage_sample["termination_reason"] == "stop_token"
+    assert model.policy_model.calls == [(7, 8), (7, 8, 1), (7, 8, 1, 2)]
+    assert model.policy_model.decoder_input_lengths == [3, 1, 1]
+    assert model.policy_model.past_key_values_seen == [None, (7, 8), (7, 8, 1)]
+    assert model.policy_model.use_cache_flags == [True, True, True]
+
+
 def test_sample_stage_projects_explicit_hydrogens_to_no_h_prefix_sequence() -> None:
     tokenizer = DummyTokenizer(
         {
@@ -1976,14 +2056,21 @@ def test_sample_stage_projects_explicit_hydrogens_to_no_h_prefix_sequence() -> N
         def __call__(
             self,
             *,
-            input_ids: torch.Tensor,
-            attention_mask: torch.Tensor,
+            input_ids: torch.Tensor | None = None,
+            attention_mask: torch.Tensor | None = None,
+            encoder_outputs=None,
             decoder_input_ids: torch.Tensor,
+            past_key_values=None,
+            use_cache: bool = False,
             return_dict: bool,
+            **kwargs,
         ) -> SimpleNamespace:
-            del input_ids, attention_mask, return_dict
+            del input_ids, attention_mask, encoder_outputs, return_dict, kwargs
+            past_tokens = tuple(int(token_id) for token_id in (past_key_values or ()))
+            decoder_tokens = tuple(int(token_id) for token_id in decoder_input_ids[0].tolist())
+            cached_decoder_tokens = past_tokens + decoder_tokens
             logits = torch.full((1, decoder_input_ids.size(1), 12), -20.0)
-            current_length = decoder_input_ids.size(1)
+            current_length = len(cached_decoder_tokens)
             if current_length == 1:
                 logits[:, -1, 1] = 0.0
             elif current_length == 2:
@@ -1993,7 +2080,10 @@ def test_sample_stage_projects_explicit_hydrogens_to_no_h_prefix_sequence() -> N
             else:
                 logits[:, -1, 4] = 6.0
                 logits[:, -1, 5] = 0.0
-            return SimpleNamespace(logits=logits)
+            return SimpleNamespace(
+                logits=logits,
+                past_key_values=cached_decoder_tokens if use_cache else None,
+            )
 
     class DummyModel:
         def __init__(self) -> None:
