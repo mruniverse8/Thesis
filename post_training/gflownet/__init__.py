@@ -11,6 +11,7 @@ from .buffer import (
 from .config import (
     GFlowNetConfig,
     GFlowNetRolloutConfig,
+    ParallelTrainingConfig,
     ReplayConfig,
     TargetGuidanceConfig,
     build_gflownet_config,
@@ -44,6 +45,7 @@ __all__ = [
     "OnPolicyBatch",
     "ExperimentalMixtureReplayBuffer",
     "ExperimentalTBMixtureReplayBuffer",
+    "ParallelTrainingConfig",
     "ReplayBuffer",
     "ReplayConfig",
     "ReplaySampleBatch",

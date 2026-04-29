@@ -61,6 +61,11 @@ gflownet:
     on_policy_fraction: 0.25
     target_prefix_rollout_fraction: 0.50
     target_teacher_fraction: 0.25
+  parallel_training:
+    enabled: false
+    mode: replicated_scoring
+    devices: ["cuda:0", "cuda:1"]
+    strict: true
   replay:
     enabled: false
     buffer_type: experimental_mixture

@@ -142,6 +142,7 @@ def resolve_metric_category(metric_key: str) -> str:
 
     if (
         metric_key in _OPTIMIZER_METRIC_KEYS
+        or metric_key.startswith("parallel_training_")
         or metric_key.startswith("objective_")
         or metric_key.startswith(("advantage_", "standardized_advantage_"))
     ):

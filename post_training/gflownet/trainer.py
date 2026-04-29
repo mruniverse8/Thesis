@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 from dataclasses import dataclass
 import json
 from pathlib import Path
@@ -172,6 +173,23 @@ def _select_optimization_trajectories(
     return optimization_candidates, optimization_candidates[:max_trajectories]
 
 
+@dataclass(frozen=True)
+class _ScoringMicrobatch:
+    start_index: int
+    trajectories: tuple[SampledStageTrajectory, ...]
+
+
+def _set_model_stage_token_constraints(
+    model: torch.nn.Module,
+    stage_token_constraints: StageTokenConstraints | None,
+) -> None:
+    set_constraints = getattr(model, "set_stage_token_constraints", None)
+    if callable(set_constraints):
+        set_constraints(stage_token_constraints)
+    elif stage_token_constraints is not None:
+        setattr(model, "_stage_token_constraints", stage_token_constraints)
+
+
 class MultiMoleculeGFlowNetTrainer:
     def __init__(
         self,
@@ -188,11 +206,19 @@ class MultiMoleculeGFlowNetTrainer:
         self.config = config
         self.reward_config = reward_config
         self.device = device or next(model.parameters()).device
-        set_constraints = getattr(self.model, "set_stage_token_constraints", None)
-        if callable(set_constraints):
-            set_constraints(stage_token_constraints)
-        elif stage_token_constraints is not None:
-            setattr(self.model, "_stage_token_constraints", stage_token_constraints)
+        self.parallel_devices = self._resolve_parallel_devices(self.device)
+        self.parallel_training_enabled = bool(self.config.parallel_training.enabled)
+        if self.parallel_training_enabled:
+            self.device = self.parallel_devices[0]
+        self.stage_token_constraints = stage_token_constraints
+        _set_model_stage_token_constraints(self.model, stage_token_constraints)
+        self.parallel_models: list[torch.nn.Module] = [self.model]
+        self._last_parallel_scoring_counts: dict[str, int] = {
+            str(self.device): 0,
+        }
+        self._last_parallel_scored_groups: list[list[ScoredStageTrajectory]] = []
+        if self.parallel_training_enabled:
+            self._initialize_parallel_replicas()
         self.model.to(self.device)
 
         trainable_parameters = [
@@ -202,6 +228,8 @@ class MultiMoleculeGFlowNetTrainer:
             trainable_parameters,
             lr=self.config.learning_rate,
         )
+        if self.parallel_training_enabled:
+            self._sync_parallel_replicas_from_primary()
         replay_enabled = bool(self.config.replay.enabled) and not bool(
             self.config.target_guidance.enabled
         )
@@ -230,6 +258,109 @@ class MultiMoleculeGFlowNetTrainer:
         self.best_checkpoint_iteration: int | None = None
         self.best_checkpoint_dir: str | None = None
         self.best_checkpoint_zip: str | None = None
+
+    def _resolve_parallel_devices(
+        self,
+        primary_device: torch.device,
+    ) -> tuple[torch.device, ...]:
+        parallel_config = self.config.parallel_training
+        if not parallel_config.enabled:
+            return (primary_device,)
+
+        devices = tuple(torch.device(device_name) for device_name in parallel_config.devices)
+        if len(devices) < 2:
+            raise ValueError("enabled parallel_training requires at least two devices.")
+        if parallel_config.mode != "replicated_scoring":
+            raise ValueError("parallel_training.mode must be: replicated_scoring.")
+
+        if parallel_config.strict:
+            if any(device.type != "cuda" for device in devices):
+                raise RuntimeError(
+                    "parallel_training.strict requires CUDA devices; "
+                    f"got {[str(device) for device in devices]}."
+                )
+            if not torch.cuda.is_available():
+                raise RuntimeError("parallel_training requested CUDA devices, but CUDA is unavailable.")
+            device_indices = tuple(0 if device.index is None else int(device.index) for device in devices)
+            if len(set(device_indices)) != len(device_indices):
+                raise RuntimeError(
+                    "parallel_training.strict requires distinct CUDA device indices."
+                )
+            available_device_count = int(torch.cuda.device_count())
+            if max(device_indices) >= available_device_count:
+                raise RuntimeError(
+                    "parallel_training requested devices "
+                    f"{[str(device) for device in devices]}, but only "
+                    f"{available_device_count} CUDA device(s) are available."
+                )
+        return devices
+
+    def _initialize_parallel_replicas(self) -> None:
+        self.parallel_models = [self.model]
+        for device in self.parallel_devices[1:]:
+            replica = copy.deepcopy(self.model)
+            _set_model_stage_token_constraints(replica, self.stage_token_constraints)
+            replica.to(device)
+            self.parallel_models.append(replica)
+
+    def _sync_parallel_replicas_from_primary(self) -> None:
+        if not self.parallel_training_enabled:
+            return
+        primary_trainable = {
+            name: parameter.detach()
+            for name, parameter in self.model.named_parameters()
+            if parameter.requires_grad
+        }
+        with torch.no_grad():
+            for replica, device in zip(self.parallel_models[1:], self.parallel_devices[1:]):
+                replica_parameters = dict(replica.named_parameters())
+                for name, source_parameter in primary_trainable.items():
+                    replica_parameters[name].copy_(source_parameter.to(device))
+
+    def _zero_parallel_replica_gradients(self) -> None:
+        if not self.parallel_training_enabled:
+            return
+        for replica in self.parallel_models[1:]:
+            for parameter in replica.parameters():
+                parameter.grad = None
+
+    def _aggregate_parallel_replica_gradients(self) -> None:
+        if not self.parallel_training_enabled:
+            return
+        primary_parameters = dict(self.model.named_parameters())
+        for replica in self.parallel_models[1:]:
+            for name, replica_parameter in replica.named_parameters():
+                if not replica_parameter.requires_grad or replica_parameter.grad is None:
+                    continue
+                primary_parameter = primary_parameters[name]
+                replica_grad = replica_parameter.grad.detach().to(primary_parameter.device)
+                if primary_parameter.grad is None:
+                    primary_parameter.grad = replica_grad.clone()
+                else:
+                    primary_parameter.grad.add_(replica_grad)
+
+    def _parallel_training_metrics(self) -> dict[str, Any]:
+        metrics: dict[str, Any] = {
+            "parallel_training_enabled": float(self.parallel_training_enabled),
+            "parallel_training_num_devices": float(
+                len(self.parallel_devices) if self.parallel_training_enabled else 1
+            ),
+            "parallel_training_devices": ",".join(str(device) for device in self.parallel_devices),
+            "parallel_training_mode": (
+                self.config.parallel_training.mode
+                if self.parallel_training_enabled
+                else "disabled"
+            ),
+        }
+        for device_name, count in sorted(self._last_parallel_scoring_counts.items()):
+            normalized_device_name = (
+                device_name.replace(":", "_")
+                .replace("/", "_")
+                .replace("-", "_")
+                .replace(" ", "_")
+            )
+            metrics[f"parallel_training_scored_trajectories_{normalized_device_name}"] = float(count)
+        return metrics
 
     def _scheduled_learning_rate(self, iteration_index: int) -> float:
         warmup_iterations = round(
@@ -402,15 +533,79 @@ class MultiMoleculeGFlowNetTrainer:
         trajectories: Sequence[SampledStageTrajectory],
     ) -> list[ScoredStageTrajectory]:
         if not trajectories:
+            self._last_parallel_scoring_counts = {
+                str(device): 0 for device in self.parallel_devices
+            }
+            self._last_parallel_scored_groups = []
             return []
 
-        scored: list[ScoredStageTrajectory] = []
-        decoder_start_token_id = int(self.model.policy_model.config.decoder_start_token_id)
-        stop_token_id = int(self.tokenizer.convert_tokens_to_ids(EOM_TOKEN))
-        microbatch_size = max(1, int(self.config.scoring_microbatch_size))
+        microbatches = self._build_scoring_microbatches(trajectories)
+        if not self.parallel_training_enabled:
+            scored_items, scored_group = self._score_microbatches(
+                model=self.model,
+                device=self.device,
+                microbatches=microbatches,
+            )
+            self._last_parallel_scoring_counts = {str(self.device): len(scored_group)}
+            self._last_parallel_scored_groups = [scored_group]
+            return [scored for _index, scored in sorted(scored_items, key=lambda item: item[0])]
 
-        for start in range(0, len(trajectories), microbatch_size):
-            trajectory_batch = list(trajectories[start : start + microbatch_size])
+        self._sync_parallel_replicas_from_primary()
+        shards = self._split_scoring_microbatches(microbatches)
+        scored_items: list[tuple[int, ScoredStageTrajectory]] = []
+        scored_groups: list[list[ScoredStageTrajectory]] = []
+        scoring_counts: dict[str, int] = {}
+        for model, device, shard in zip(self.parallel_models, self.parallel_devices, shards):
+            shard_items, shard_group = self._score_microbatches(
+                model=model,
+                device=device,
+                microbatches=shard,
+            )
+            scored_items.extend(shard_items)
+            scored_groups.append(shard_group)
+            scoring_counts[str(device)] = len(shard_group)
+        self._last_parallel_scoring_counts = scoring_counts
+        self._last_parallel_scored_groups = scored_groups
+        return [scored for _index, scored in sorted(scored_items, key=lambda item: item[0])]
+
+    def _build_scoring_microbatches(
+        self,
+        trajectories: Sequence[SampledStageTrajectory],
+    ) -> list[_ScoringMicrobatch]:
+        microbatch_size = max(1, int(self.config.scoring_microbatch_size))
+        return [
+            _ScoringMicrobatch(
+                start_index=start,
+                trajectories=tuple(trajectories[start : start + microbatch_size]),
+            )
+            for start in range(0, len(trajectories), microbatch_size)
+        ]
+
+    def _split_scoring_microbatches(
+        self,
+        microbatches: Sequence[_ScoringMicrobatch],
+    ) -> list[list[_ScoringMicrobatch]]:
+        shards: list[list[_ScoringMicrobatch]] = [
+            [] for _device in self.parallel_devices
+        ]
+        for microbatch_index, microbatch in enumerate(microbatches):
+            shards[microbatch_index % len(shards)].append(microbatch)
+        return shards
+
+    def _score_microbatches(
+        self,
+        *,
+        model: torch.nn.Module,
+        device: torch.device,
+        microbatches: Sequence[_ScoringMicrobatch],
+    ) -> tuple[list[tuple[int, ScoredStageTrajectory]], list[ScoredStageTrajectory]]:
+        scored: list[ScoredStageTrajectory] = []
+        scored_items: list[tuple[int, ScoredStageTrajectory]] = []
+        decoder_start_token_id = int(model.policy_model.config.decoder_start_token_id)
+        stop_token_id = int(self.tokenizer.convert_tokens_to_ids(EOM_TOKEN))
+
+        for microbatch in microbatches:
+            trajectory_batch = list(microbatch.trajectories)
             prompt_inputs = self.tokenizer(
                 [trajectory.prompt_text for trajectory in trajectory_batch],
                 padding=True,
@@ -434,7 +629,7 @@ class MultiMoleculeGFlowNetTrainer:
                 )
                 for trajectory in trajectory_batch
             ]
-            batch_scores = self.model.score_action_sequences(
+            batch_scores = model.score_action_sequences(
                 input_ids=prompt_input_ids,
                 attention_mask=prompt_attention_mask,
                 decoder_prefix_ids=decoder_prefix_ids,
@@ -443,19 +638,21 @@ class MultiMoleculeGFlowNetTrainer:
                 ],
                 stop_token_id=stop_token_id,
             )
-            for trajectory, (log_pf_tokens, log_stop, log_state_flows) in zip(
-                trajectory_batch,
-                batch_scores,
-            ):
-                scored.append(
-                    ScoredStageTrajectory(
-                        sampled=trajectory,
-                        log_pf_tokens=log_pf_tokens,
-                        log_stop=log_stop,
-                        log_state_flows=log_state_flows,
-                    )
+            for row_offset, (trajectory, (log_pf_tokens, log_stop, log_state_flows)) in enumerate(
+                zip(
+                    trajectory_batch,
+                    batch_scores,
                 )
-        return scored
+            ):
+                scored_trajectory = ScoredStageTrajectory(
+                    sampled=trajectory,
+                    log_pf_tokens=log_pf_tokens,
+                    log_stop=log_stop,
+                    log_state_flows=log_state_flows,
+                )
+                scored.append(scored_trajectory)
+                scored_items.append((microbatch.start_index + row_offset, scored_trajectory))
+        return scored_items, scored
 
     def _compute_objective_loss(
         self,
@@ -469,23 +666,63 @@ class MultiMoleculeGFlowNetTrainer:
                 "objective_residual_std": 0.0,
             }
 
+        numerator, denominator, residuals = self._compute_objective_components(scored_trajectories)
+        loss = numerator / denominator.clamp_min(1.0e-12)
+        return loss, self._build_objective_diagnostics(
+            scored_trajectories,
+            loss=loss,
+            residuals=residuals,
+        )
+
+    def _compute_parallel_objective_loss(
+        self,
+        scored_groups: Sequence[Sequence[ScoredStageTrajectory]],
+        fallback_scored_trajectories: Sequence[ScoredStageTrajectory],
+    ) -> tuple[torch.Tensor, dict[str, float]]:
+        non_empty_groups = [list(group) for group in scored_groups if group]
+        if not self.parallel_training_enabled or len(non_empty_groups) <= 1:
+            return self._compute_objective_loss(fallback_scored_trajectories)
+
+        numerator_terms: list[torch.Tensor] = []
+        denominator_terms: list[torch.Tensor] = []
+        residual_sets: list[torch.Tensor] = []
+        ordered_scored: list[ScoredStageTrajectory] = []
+        for group in non_empty_groups:
+            numerator, denominator, residuals = self._compute_objective_components(group)
+            numerator_terms.append(numerator.to(self.device))
+            denominator_terms.append(denominator.to(self.device))
+            residual_sets.append(residuals.detach().to(self.device))
+            ordered_scored.extend(group)
+
+        numerator_total = torch.stack(numerator_terms).sum()
+        denominator_total = torch.stack(denominator_terms).sum().clamp_min(1.0e-12)
+        loss = numerator_total / denominator_total
+        residuals = (
+            torch.cat(residual_sets)
+            if residual_sets
+            else torch.zeros(0, dtype=torch.float32, device=self.device)
+        )
+        return loss, self._build_objective_diagnostics(
+            ordered_scored,
+            loss=loss,
+            residuals=residuals,
+        )
+
+    def _compute_objective_components(
+        self,
+        scored_trajectories: Sequence[ScoredStageTrajectory],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         if self.config.objective == "tb":
             residuals = torch.stack(
                 [trajectory_balance_residual(trajectory) for trajectory in scored_trajectories]
             )
-            loss = trajectory_balance_loss(scored_trajectories)
-            diagnostics = {
-                "objective_loss": float(loss.item()),
-                "objective_residual_mean": _tensor_mean(residuals),
-                "objective_residual_std": _tensor_std(residuals),
-                "mean_root_log_flow": _tensor_mean(
-                    torch.stack([trajectory.log_state_flows[0] for trajectory in scored_trajectories])
-                ),
-                "mean_terminal_stop_logprob": _tensor_mean(
-                    torch.stack([trajectory.log_stop[-1] for trajectory in scored_trajectories])
-                ),
-            }
-            return loss, diagnostics
+            numerator = residuals.pow(2).sum()
+            denominator = torch.tensor(
+                float(max(residuals.numel(), 1)),
+                dtype=residuals.dtype,
+                device=residuals.device,
+            )
+            return numerator, denominator, residuals
 
         if self.config.objective == "db":
             residual_sets = [
@@ -493,40 +730,68 @@ class MultiMoleculeGFlowNetTrainer:
             ]
             residuals = torch.cat(residual_sets) if residual_sets else torch.zeros((), device=self.device)
             loss_terms = [detailed_balance_loss(trajectory) for trajectory in scored_trajectories]
-            loss = torch.stack(loss_terms).mean() if loss_terms else torch.zeros((), device=self.device)
-            diagnostics = {
-                "objective_loss": float(loss.item()),
-                "objective_residual_mean": _tensor_mean(residuals),
-                "objective_residual_std": _tensor_std(residuals),
-                "mean_root_log_flow": _tensor_mean(
-                    torch.stack([trajectory.log_state_flows[0] for trajectory in scored_trajectories])
-                ),
-                "mean_terminal_stop_logprob": _tensor_mean(
-                    torch.stack([trajectory.log_stop[-1] for trajectory in scored_trajectories])
-                ),
-            }
-            return loss, diagnostics
+            if loss_terms:
+                numerator = torch.stack(loss_terms).sum()
+                denominator = torch.tensor(
+                    float(len(loss_terms)),
+                    dtype=numerator.dtype,
+                    device=numerator.device,
+                )
+            else:
+                numerator = torch.zeros((), device=self.device)
+                denominator = torch.ones((), device=self.device)
+            return numerator, denominator, residuals
 
         if self.config.objective == "subtb":
-            residual_sets = [
-                subtrajectory_balance_residuals(trajectory)[0] for trajectory in scored_trajectories
-            ]
-            residuals = torch.cat(residual_sets) if residual_sets else torch.zeros((), device=self.device)
-            loss = subtrajectory_balance_loss(scored_trajectories)
-            diagnostics = {
-                "objective_loss": float(loss.item()),
-                "objective_residual_mean": _tensor_mean(residuals),
-                "objective_residual_std": _tensor_std(residuals),
-                "mean_root_log_flow": _tensor_mean(
-                    torch.stack([trajectory.log_state_flows[0] for trajectory in scored_trajectories])
-                ),
-                "mean_terminal_stop_logprob": _tensor_mean(
-                    torch.stack([trajectory.log_stop[-1] for trajectory in scored_trajectories])
-                ),
-            }
-            return loss, diagnostics
+            residual_sets: list[torch.Tensor] = []
+            weighted_numerators: list[torch.Tensor] = []
+            weighted_denominators: list[torch.Tensor] = []
+            fallback_device = self.device
+            fallback_dtype = torch.float32
+            for trajectory in scored_trajectories:
+                residuals, weights = subtrajectory_balance_residuals(trajectory)
+                if residuals.numel() == 0:
+                    continue
+                fallback_device = residuals.device
+                fallback_dtype = residuals.dtype
+                residual_sets.append(residuals)
+                weighted_numerators.append((weights * residuals.pow(2)).sum())
+                weighted_denominators.append(weights.sum())
+            if weighted_numerators:
+                numerator = torch.stack(weighted_numerators).sum()
+                denominator = torch.stack(weighted_denominators).sum()
+                residuals = torch.cat(residual_sets)
+            else:
+                numerator = torch.zeros((), device=fallback_device, dtype=fallback_dtype)
+                denominator = torch.ones((), device=fallback_device, dtype=fallback_dtype)
+                residuals = torch.zeros(0, device=fallback_device, dtype=fallback_dtype)
+            return numerator, denominator, residuals
 
         raise ValueError(f"Unsupported objective: {self.config.objective!r}")
+
+    def _build_objective_diagnostics(
+        self,
+        scored_trajectories: Sequence[ScoredStageTrajectory],
+        *,
+        loss: torch.Tensor,
+        residuals: torch.Tensor,
+    ) -> dict[str, float]:
+        residual_values = residuals.detach().to(self.device)
+        root_log_flows = stack_scalar_likes(
+            [trajectory.log_state_flows[0] for trajectory in scored_trajectories],
+            device=self.device,
+        )
+        terminal_stop_logprobs = stack_scalar_likes(
+            [trajectory.log_stop[-1] for trajectory in scored_trajectories],
+            device=self.device,
+        )
+        return {
+            "objective_loss": float(loss.detach().to(self.device).item()),
+            "objective_residual_mean": _tensor_mean(residual_values),
+            "objective_residual_std": _tensor_std(residual_values),
+            "mean_root_log_flow": _tensor_mean(root_log_flows),
+            "mean_terminal_stop_logprob": _tensor_mean(terminal_stop_logprobs),
+        }
 
     def train_iteration(
         self,
@@ -646,6 +911,9 @@ class MultiMoleculeGFlowNetTrainer:
         target_teacher_batch = OnPolicyBatch.from_trajectories(target_teacher_trajectories)
 
         if not optimization_trajectories:
+            self._last_parallel_scoring_counts = {
+                str(device): 0 for device in self.parallel_devices
+            }
             iteration_duration_sec = perf_counter() - iteration_start
             metrics: dict[str, Any] = {
                 "iteration": float(iteration_index),
@@ -753,6 +1021,7 @@ class MultiMoleculeGFlowNetTrainer:
                     max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
                     invalid_terminal_reward=self.config.invalid_terminal_reward,
                 ),
+                **self._parallel_training_metrics(),
             }
             diagnostic_metrics = None
             categorized_diagnostic_metrics = None
@@ -775,12 +1044,17 @@ class MultiMoleculeGFlowNetTrainer:
             self.replay_buffer.observe_scored(scored_trajectories)
 
         loss_start = perf_counter()
-        loss, diagnostics = self._compute_objective_loss(scored_trajectories)
+        loss, diagnostics = self._compute_parallel_objective_loss(
+            self._last_parallel_scored_groups,
+            scored_trajectories,
+        )
         loss_duration_sec = perf_counter() - loss_start
 
         self.optimizer.zero_grad(set_to_none=True)
+        self._zero_parallel_replica_gradients()
         backward_start = perf_counter()
         loss.backward()
+        self._aggregate_parallel_replica_gradients()
         grad_norm = torch.nn.utils.clip_grad_norm_(
             self.model.parameters(),
             self.config.max_grad_norm,
@@ -788,6 +1062,7 @@ class MultiMoleculeGFlowNetTrainer:
         backward_duration_sec = perf_counter() - backward_start
         optimizer_start = perf_counter()
         self.optimizer.step()
+        self._sync_parallel_replicas_from_primary()
         optimizer_duration_sec = perf_counter() - optimizer_start
         iteration_duration_sec = perf_counter() - iteration_start
 
@@ -956,6 +1231,7 @@ class MultiMoleculeGFlowNetTrainer:
                 max_molecules_per_sequence=self.config.rollout.max_molecules_per_sequence,
                 invalid_terminal_reward=self.config.invalid_terminal_reward,
             ),
+            **self._parallel_training_metrics(),
         }
 
         diagnostic_metrics = None
@@ -1119,7 +1395,6 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
         model.policy_model,
         context="GFlowNet checkpoint",
     )
-    model.to(device)
 
     train_dataset = MultiMoleculeDataset.from_jsonl(config["data"]["train_file"])
     set_constraints = getattr(model, "set_stage_token_constraints", None)

@@ -50,6 +50,10 @@ GFLOWNET_TRACKER_HEADLINE_METRIC_KEYS = frozenset(
         "rollout_return_last_valid_trajectory_only",
         "grad_norm",
         "all_finite",
+        "parallel_training_enabled",
+        "parallel_training_num_devices",
+        "parallel_training_devices",
+        "parallel_training_mode",
     }
 )
 

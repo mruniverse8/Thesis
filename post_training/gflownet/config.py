@@ -74,6 +74,26 @@ class TargetGuidanceConfig:
 
 
 @dataclass(frozen=True)
+class ParallelTrainingConfig:
+    enabled: bool = False
+    mode: str = "replicated_scoring"
+    devices: tuple[str, ...] = ("cuda:0", "cuda:1")
+    strict: bool = True
+
+    def __post_init__(self) -> None:
+        normalized_mode = str(self.mode).strip().lower()
+        if normalized_mode != "replicated_scoring":
+            raise ValueError("parallel_training.mode must be: replicated_scoring.")
+        normalized_devices = tuple(str(device).strip() for device in self.devices)
+        if any(not device for device in normalized_devices):
+            raise ValueError("parallel_training.devices must not contain empty values.")
+        if bool(self.enabled) and len(normalized_devices) < 2:
+            raise ValueError("enabled parallel_training requires at least two devices.")
+        object.__setattr__(self, "mode", normalized_mode)
+        object.__setattr__(self, "devices", normalized_devices)
+
+
+@dataclass(frozen=True)
 class GFlowNetConfig:
     output_dir: str = "outputs/post_training_gflownet"
     seed: int = 42
@@ -100,12 +120,14 @@ class GFlowNetConfig:
     rollout: GFlowNetRolloutConfig = field(default_factory=GFlowNetRolloutConfig)
     replay: ReplayConfig = field(default_factory=ReplayConfig)
     target_guidance: TargetGuidanceConfig = field(default_factory=TargetGuidanceConfig)
+    parallel_training: ParallelTrainingConfig = field(default_factory=ParallelTrainingConfig)
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> "GFlowNetConfig":
         rollout_payload = dict(payload.get("rollout", {}))
         replay_payload = dict(payload.get("replay", {}))
         target_guidance_payload = dict(payload.get("target_guidance", {}))
+        parallel_training_payload = dict(payload.get("parallel_training", {}))
         target_modules = tuple(payload.get("target_modules", ("q", "v")))
         objective = str(payload.get("objective", cls.objective)).strip().lower()
         if objective not in {"tb", "db", "subtb"}:
@@ -159,6 +181,12 @@ class GFlowNetConfig:
                     1.0 - 1.0e-6,
                 ),
             )
+        parallel_training_devices = parallel_training_payload.get(
+            "devices",
+            ParallelTrainingConfig.devices,
+        )
+        if isinstance(parallel_training_devices, str):
+            parallel_training_devices = (parallel_training_devices,)
         return cls(
             output_dir=str(payload.get("output_dir", cls.output_dir)),
             seed=int(payload.get("seed", cls.seed)),
@@ -502,6 +530,29 @@ class GFlowNetConfig:
                     target_guidance_payload.get(
                         "shuffle_target_selfies_list",
                         TargetGuidanceConfig.shuffle_target_selfies_list,
+                    )
+                ),
+            ),
+            parallel_training=ParallelTrainingConfig(
+                enabled=bool(
+                    parallel_training_payload.get(
+                        "enabled",
+                        ParallelTrainingConfig.enabled,
+                    )
+                ),
+                mode=str(
+                    parallel_training_payload.get(
+                        "mode",
+                        ParallelTrainingConfig.mode,
+                    )
+                ),
+                devices=tuple(
+                    parallel_training_devices
+                ),
+                strict=bool(
+                    parallel_training_payload.get(
+                        "strict",
+                        ParallelTrainingConfig.strict,
                     )
                 ),
             ),

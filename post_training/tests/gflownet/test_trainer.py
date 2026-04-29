@@ -12,6 +12,7 @@ from src.constants import EOM_TOKEN
 from post_training.gflownet.config import (
     GFlowNetConfig,
     GFlowNetRolloutConfig,
+    ParallelTrainingConfig,
     ReplayConfig,
     TargetGuidanceConfig,
 )
@@ -132,6 +133,12 @@ class _RecordingScoreModel(torch.nn.Module):
         self.weight = torch.nn.Parameter(torch.tensor(1.0))
         self.policy_model = SimpleNamespace(config=SimpleNamespace(decoder_start_token_id=0))
         self.calls: list[tuple[tuple[int, ...], ...]] = []
+
+    def __deepcopy__(self, memo):
+        del memo
+        copied = _RecordingScoreModel()
+        copied.weight.data.copy_(self.weight.detach())
+        return copied
 
     def score_action_sequences(
         self,
@@ -327,6 +334,42 @@ def test_score_trajectories_preserves_order_across_scoring_microbatches() -> Non
     assert tokenizer.batch_calls[0]["return_tensors"] == "pt"
 
 
+def test_parallel_score_trajectories_splits_microbatches_and_preserves_order() -> None:
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            scoring_microbatch_size=2,
+            rollout=GFlowNetRolloutConfig(max_source_length=12),
+            parallel_training=ParallelTrainingConfig(
+                enabled=True,
+                devices=("cpu:0", "cpu:1"),
+                strict=False,
+            ),
+        ),
+        device=torch.device("cpu"),
+    )
+    trajectories = [
+        _make_sampled_trajectory(
+            rollout_id=f"parallel-{index}",
+            prompt_text=f"prompt-{index}",
+            terminal_reward=1.0 + index,
+            action_token_ids=tuple(range(10 + index, 12 + index)),
+        )
+        for index in range(5)
+    ]
+
+    scored = trainer.score_trajectories(trajectories)
+
+    assert [trajectory.sampled.rollout_id for trajectory in scored] == [
+        trajectory.rollout_id for trajectory in trajectories
+    ]
+    assert trainer._last_parallel_scoring_counts == {"cpu:0": 3, "cpu:1": 2}
+    assert [len(group) for group in trainer._last_parallel_scored_groups] == [3, 2]
+    assert [len(call) for call in trainer.parallel_models[0].calls] == [2, 1]
+    assert [len(call) for call in trainer.parallel_models[1].calls] == [2]
+
+
 @pytest.mark.parametrize("objective", ["tb", "db", "subtb"])
 def test_objective_loss_is_scoring_microbatch_invariant(objective: str) -> None:
     trajectories = [
@@ -355,6 +398,119 @@ def test_objective_loss_is_scoring_microbatch_invariant(objective: str) -> None:
 
     assert losses[1] == pytest.approx(losses[0], abs=1.0e-7)
     assert losses[2] == pytest.approx(losses[0], abs=1.0e-7)
+
+
+@pytest.mark.parametrize("objective", ["tb", "db", "subtb"])
+def test_parallel_objective_loss_is_split_invariant(objective: str) -> None:
+    trajectories = [
+        _make_sampled_trajectory(
+            rollout_id=f"parallel-loss-{index}",
+            terminal_reward=1.0 + 0.25 * index,
+            action_token_ids=tuple(range(10 + index, 12 + index + (index % 2))),
+        )
+        for index in range(5)
+    ]
+    single_trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(objective=objective, scoring_microbatch_size=2),
+        device=torch.device("cpu"),
+    )
+    parallel_trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            objective=objective,
+            scoring_microbatch_size=2,
+            parallel_training=ParallelTrainingConfig(
+                enabled=True,
+                devices=("cpu:0", "cpu:1"),
+                strict=False,
+            ),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    single_scored = single_trainer.score_trajectories(trajectories)
+    single_loss, _single_diagnostics = single_trainer._compute_objective_loss(single_scored)
+    parallel_scored = parallel_trainer.score_trajectories(trajectories)
+    parallel_loss, _parallel_diagnostics = parallel_trainer._compute_parallel_objective_loss(
+        parallel_trainer._last_parallel_scored_groups,
+        parallel_scored,
+    )
+
+    assert float(parallel_loss.detach().item()) == pytest.approx(
+        float(single_loss.detach().item()),
+        abs=1.0e-7,
+    )
+
+
+def test_parallel_gradient_aggregation_matches_single_model_gradient() -> None:
+    trajectories = [
+        _make_sampled_trajectory(
+            rollout_id=f"parallel-grad-{index}",
+            terminal_reward=1.0 + 0.25 * index,
+            action_token_ids=tuple(range(10 + index, 12 + index)),
+        )
+        for index in range(4)
+    ]
+    single_model = _RecordingScoreModel()
+    single_trainer = MultiMoleculeGFlowNetTrainer(
+        model=single_model,
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(objective="tb", scoring_microbatch_size=2),
+        device=torch.device("cpu"),
+    )
+    single_scored = single_trainer.score_trajectories(trajectories)
+    single_loss, _single_diagnostics = single_trainer._compute_objective_loss(single_scored)
+    single_trainer.optimizer.zero_grad(set_to_none=True)
+    single_loss.backward()
+
+    parallel_model = _RecordingScoreModel()
+    parallel_trainer = MultiMoleculeGFlowNetTrainer(
+        model=parallel_model,
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            objective="tb",
+            scoring_microbatch_size=2,
+            parallel_training=ParallelTrainingConfig(
+                enabled=True,
+                devices=("cpu:0", "cpu:1"),
+                strict=False,
+            ),
+        ),
+        device=torch.device("cpu"),
+    )
+    parallel_scored = parallel_trainer.score_trajectories(trajectories)
+    parallel_loss, _parallel_diagnostics = parallel_trainer._compute_parallel_objective_loss(
+        parallel_trainer._last_parallel_scored_groups,
+        parallel_scored,
+    )
+    parallel_trainer.optimizer.zero_grad(set_to_none=True)
+    parallel_trainer._zero_parallel_replica_gradients()
+    parallel_loss.backward()
+    parallel_trainer._aggregate_parallel_replica_gradients()
+
+    assert parallel_model.weight.grad is not None
+    assert single_model.weight.grad is not None
+    assert float(parallel_model.weight.grad.item()) == pytest.approx(
+        float(single_model.weight.grad.item()),
+        abs=1.0e-7,
+    )
+
+
+def test_parallel_training_strict_mode_requires_requested_cuda_devices(monkeypatch) -> None:
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+
+    with pytest.raises(RuntimeError, match="CUDA is unavailable"):
+        MultiMoleculeGFlowNetTrainer(
+            model=_RecordingScoreModel(),
+            tokenizer=_BatchScoringTokenizer(),
+            config=GFlowNetConfig(
+                parallel_training=ParallelTrainingConfig(enabled=True),
+            ),
+            device=torch.device("cpu"),
+        )
 
 
 def test_scheduled_learning_rate_ramps_over_configured_warmup_iterations() -> None:
@@ -1114,6 +1270,46 @@ def test_save_best_checkpoint_tracks_lowest_objective_loss_and_writes_zip(
     assert trainer.best_objective_loss == 1.0
     assert trainer.best_checkpoint_iteration == 3
     assert json.loads((checkpoint_dir / "iteration_metrics.json").read_text())["objective_loss"] == 1.0
+
+
+def test_parallel_save_best_checkpoint_uses_primary_model(monkeypatch, tmp_path: Path) -> None:
+    captured: dict[str, object] = {}
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            output_dir=str(tmp_path / "outputs"),
+            parallel_training=ParallelTrainingConfig(
+                enabled=True,
+                devices=("cpu:0", "cpu:1"),
+                strict=False,
+            ),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    def fake_save_gflownet_checkpoint_artifacts(**kwargs):
+        captured.update(kwargs)
+        checkpoint_dir = Path(kwargs["checkpoint_dir"])
+        return checkpoint_dir, checkpoint_dir.with_suffix(".zip")
+
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.save_gflownet_checkpoint_artifacts",
+        fake_save_gflownet_checkpoint_artifacts,
+    )
+
+    checkpoint_dir = trainer.save_best_checkpoint(
+        iteration_index=1,
+        metrics={"objective_loss": 1.0},
+        trajectories=[
+            _make_sampled_trajectory(rollout_id="parallel-best", terminal_reward=1.0)
+        ],
+    )
+
+    assert captured["model"] is trainer.model
+    assert captured["model"] is trainer.parallel_models[0]
+    assert captured["model"] is not trainer.parallel_models[1]
+    assert checkpoint_dir == tmp_path / "outputs" / "checkpoints" / "best"
 
 
 def test_run_multi_molecule_gflownet_uses_epoch_batches_for_configured_iterations(

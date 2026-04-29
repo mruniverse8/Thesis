@@ -4,6 +4,7 @@ import pytest
 
 from post_training.gflownet.config import (
     GFlowNetConfig,
+    ParallelTrainingConfig,
     TargetGuidanceConfig,
     build_gflownet_config,
 )
@@ -96,9 +97,47 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.target_guidance.teacher_stage_strategy == "random"
     assert config.target_guidance.prefix_stage_strategy == "random"
     assert config.target_guidance.shuffle_target_selfies_list is True
+    assert config.parallel_training.enabled is False
+    assert config.parallel_training.mode == "replicated_scoring"
+    assert config.parallel_training.devices == ("cuda:0", "cuda:1")
+    assert config.parallel_training.strict is True
     assert config.to_dict()["max_optimization_trajectories_per_iter"] == 16
     assert config.to_dict()["scoring_microbatch_size"] == 3
     assert config.to_dict()["target_guidance"]["shuffle_target_selfies_list"] is True
+    assert config.to_dict()["parallel_training"]["enabled"] is False
+
+
+def test_gflownet_config_from_dict_parses_parallel_training() -> None:
+    config = GFlowNetConfig.from_dict(
+        {
+            "parallel_training": {
+                "enabled": True,
+                "mode": "replicated_scoring",
+                "devices": ["cuda:0", "cuda:1"],
+                "strict": True,
+            }
+        }
+    )
+
+    assert config.parallel_training.enabled is True
+    assert config.parallel_training.mode == "replicated_scoring"
+    assert config.parallel_training.devices == ("cuda:0", "cuda:1")
+    assert config.parallel_training.strict is True
+    assert config.to_dict()["parallel_training"] == {
+        "enabled": True,
+        "mode": "replicated_scoring",
+        "devices": ("cuda:0", "cuda:1"),
+        "strict": True,
+    }
+
+
+def test_parallel_training_config_rejects_invalid_enabled_payload() -> None:
+    with pytest.raises(ValueError, match="mode"):
+        ParallelTrainingConfig(enabled=True, mode="ddp")
+    with pytest.raises(ValueError, match="at least two devices"):
+        ParallelTrainingConfig(enabled=True, devices=("cuda:0",))
+    with pytest.raises(ValueError, match="empty"):
+        ParallelTrainingConfig(enabled=True, devices=("cuda:0", ""))
 
 
 def test_gflownet_config_defaults_to_uncapped_optimization_trajectories() -> None:

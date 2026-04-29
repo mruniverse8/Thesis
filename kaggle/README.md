@@ -73,11 +73,11 @@ Exception:
    - writes `config_snapshot.json` under `outputs/kaggle/mini_post_training/`
    - exports `thesis_artifacts/mini_post_training/` and writes `thesis_artifacts/mini-post-training.zip`
 8. `07_v2_train_multi_molecule_gflownet_lpm24_ablation.ipynb`
-   - runs the LPM24 multi-molecule GFlowNet v2.4 ablation from `configs/multi_molecule_gflownet_lpm24.yaml`
+   - runs the LPM24 multi-molecule GFlowNet v2.4.1 ablation from `configs/multi_molecule_gflownet_lpm24.yaml`
    - uses `/kaggle/working/Thesis` and `scripts/init_kaggle.py --stage gflownet`
    - prepares the upstream LPM24 SFT checkpoint from `GFLOWNET_CHECKPOINT_DOWNLOAD_SOURCE`
    - downloads LPM24 if the processed files are missing, then runs `scripts/prepare_lpm24_training_splits.py`
-   - exposes the baseline DB, beam rollout, target-guidance, replay, and reward ablation knobs in one parameter cell
+   - exposes the baseline DB, beam rollout, target-guidance, replay, reward, and two-GPU parallel-training knobs in one parameter cell
    - reads W&B credentials only from `WANDB_API_KEY` in the notebook environment
    - writes training outputs under `/kaggle/working/Thesis/outputs/kaggle/train_gflownet_lpm24_ablation/<run_name>/`
    - exports `thesis_artifacts/train_gflownet_lpm24_ablation/` and `thesis_artifacts/train_gflownet_lpm24_ablation.zip`
@@ -104,7 +104,7 @@ Exception:
 - The mini notebook is self-contained: it does not depend on `05_merge_biot5_collection_parts.ipynb` or any attached grouped artifact dataset.
 - `06_biot5_mini_dataset_review.ipynb` collects 128 descriptions and samples 100 candidates per description before filtering, deduplication, and grouped post-training export.
 - `scripts/init_kaggle.py --stage multi_sft`, `scripts/init_kaggle.py --stage ppo`, and `scripts/init_kaggle.py --stage gflownet` default to the mini configs and call `scripts/download_train_dataset.py` automatically when `data/mini_post_training/` is missing.
-- For LPM24 GFlowNet ablations, keep internet and a GPU enabled. The notebook downloads LPM24 data when needed, installs repo requirements, fetches the upstream SFT checkpoint, trains GFlowNet, and runs validation generation evaluation.
+- For LPM24 GFlowNet ablations, keep internet enabled and select a two-GPU accelerator when using the v2.4.1 parallel defaults. The notebook downloads LPM24 data when needed, installs repo requirements, fetches the upstream SFT checkpoint, trains GFlowNet, and runs validation generation evaluation.
 - To use W&B in Kaggle, add `WANDB_API_KEY` as a secret or environment variable. Do not paste a literal `wandb_v1_...` key into the notebook.
 - `07_v2_train_multi_molecule_gflownet_lpm24_ablation.ipynb` sets `GFLOWNET_CHECKPOINT_DOWNLOAD_SOURCE` to the existing LPM24 SFT checkpoint Google Drive file id. Override that parameter if the checkpoint artifact is published somewhere else.
 - The post-training configs in the repo expect grouped validation and test files that are not produced by the ChEBI collection step. The multi-molecule SFT and PPO notebooks derive Kaggle-local split files from the collected grouped train file, and `06_biot5_mini_dataset_review.ipynb` now packages a small version of those grouped splits directly for debugging.
