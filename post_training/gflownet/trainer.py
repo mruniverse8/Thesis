@@ -246,6 +246,9 @@ class MultiMoleculeGFlowNetTrainer:
             return float(self.config.learning_rate) * warmup_progress
         return float(self.config.learning_rate)
 
+    def _final_iteration_index(self) -> int:
+        return int(self.config.start_iteration) + int(self.config.gflownet_iterations)
+
     def _set_optimizer_learning_rate(self, learning_rate: float) -> None:
         for parameter_group in self.optimizer.param_groups:
             parameter_group["lr"] = float(learning_rate)
@@ -979,7 +982,7 @@ class MultiMoleculeGFlowNetTrainer:
 
         if (
             iteration_index % self.config.save_every_iterations == 0
-            or iteration_index == self.config.gflownet_iterations
+            or iteration_index == self._final_iteration_index()
         ):
             self.save_checkpoint(
                 iteration_index=iteration_index,
@@ -1014,7 +1017,7 @@ class MultiMoleculeGFlowNetTrainer:
             config=self.config.to_dict(),
             metrics=metrics,
             trajectories=trajectories,
-            create_archive=iteration_index == self.config.gflownet_iterations,
+            create_archive=iteration_index == self._final_iteration_index(),
         )
 
     def save_best_checkpoint(
@@ -1173,7 +1176,9 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
             rng=random.Random(gflownet_config.seed),
         )
         report_accumulator = GFlowNetReportAccumulator()
-        for iteration in range(1, gflownet_config.gflownet_iterations + 1):
+        start_iteration = int(gflownet_config.start_iteration)
+        final_iteration = start_iteration + int(gflownet_config.gflownet_iterations)
+        for iteration in range(start_iteration + 1, final_iteration + 1):
             iteration_examples, epoch_index = sampler.next_batch()
             iteration_result = trainer.train_iteration(
                 iteration_examples,
@@ -1256,6 +1261,8 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
         summary = {
             "output_dir": str(output_dir),
             "num_iterations": gflownet_config.gflownet_iterations,
+            "start_iteration": gflownet_config.start_iteration,
+            "final_iteration": final_iteration,
             "history": history,
             "resolved_checkpoint_source": resolved_checkpoint_path_or_id,
             "resolved_checkpoint_path_or_id": resolved_checkpoint_path_or_id,
