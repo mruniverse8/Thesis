@@ -757,7 +757,7 @@ def sample_stage(
     stage_token_constraints: StageTokenConstraints | None = None,
 ) -> dict[str, Any]:
     decoding_strategy = str(generation_config.decoding_strategy).strip().lower()
-    if decoding_strategy == "beam" or generation_config.num_beams > 1:
+    if decoding_strategy == "beam":
         return beam_search_stage(
             model,
             tokenizer,

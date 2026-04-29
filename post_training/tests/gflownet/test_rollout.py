@@ -1968,7 +1968,7 @@ def test_sample_stage_explicit_sample_strategy_preserves_sampling_path() -> None
         decoder_prefix_ids=torch.tensor([[0]], dtype=torch.long),
         generation_config=GFlowNetRolloutConfig(
             decoding_strategy="sample",
-            num_beams=1,
+            num_beams=2,
             max_stage_new_tokens=4,
             top_p=1.0,
         ),

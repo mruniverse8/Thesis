@@ -266,22 +266,27 @@ class MultiMoleculeGFlowNetTrainer:
     ) -> list[SampledStageTrajectory]:
         trajectories: list[SampledStageTrajectory] = []
         return_last_valid_trajectory_only = self.config.objective == "subtb"
+        max_retained_trajectories = max(1, int(self.config.rollout.max_molecules_per_sequence))
         for example_index, example in enumerate(examples):
             rollout_id = f"iter-{iteration_index:04d}-sample-{example_index:04d}-{example['id']}"
-            trajectories.extend(
-                sample_stage_trajectories_for_example(
-                    self.model,
-                    self.tokenizer,
-                    example,
-                    rollout_id=rollout_id,
-                    generation_config=self.config.rollout,
-                    reward_config=self.reward_config,
-                    invalid_terminal_reward=self.config.invalid_terminal_reward,
-                    device=self.device,
-                    rng=self.rollout_rng,
-                    return_last_valid_trajectory_only=return_last_valid_trajectory_only,
-                )
+            sampled_trajectories = sample_stage_trajectories_for_example(
+                self.model,
+                self.tokenizer,
+                example,
+                rollout_id=rollout_id,
+                generation_config=self.config.rollout,
+                reward_config=self.reward_config,
+                invalid_terminal_reward=self.config.invalid_terminal_reward,
+                device=self.device,
+                rng=self.rollout_rng,
+                return_last_valid_trajectory_only=return_last_valid_trajectory_only,
             )
+            remaining_slots = max_retained_trajectories - len(trajectories)
+            if remaining_slots <= 0:
+                break
+            trajectories.extend(sampled_trajectories[:remaining_slots])
+            if len(trajectories) >= max_retained_trajectories:
+                break
         return trajectories
 
     def _target_guidance_example_for_sample(

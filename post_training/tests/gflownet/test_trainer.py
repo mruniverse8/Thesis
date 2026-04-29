@@ -467,6 +467,53 @@ def test_collect_on_policy_trajectories_passes_last_valid_only_flag_for_subtb(
     assert calls == [expected_return_last_valid_trajectory_only]
 
 
+def test_collect_on_policy_trajectories_stops_after_retained_cap(monkeypatch) -> None:
+    class DummyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = torch.nn.Parameter(torch.tensor(1.0))
+
+    sampled_example_ids: list[str] = []
+
+    def fake_sample_stage_trajectories_for_example(*args, **kwargs):
+        del args
+        sampled_example_ids.append(str(kwargs["rollout_id"]))
+        return [
+            _make_sampled_trajectory(
+                rollout_id=f"{kwargs['rollout_id']}-stage-{stage_index}",
+                terminal_reward=1.0,
+                stage_index=stage_index,
+            )
+            for stage_index in (1, 2)
+        ]
+
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.sample_stage_trajectories_for_example",
+        fake_sample_stage_trajectories_for_example,
+    )
+
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=DummyModel(),
+        tokenizer=None,
+        config=GFlowNetConfig(
+            rollout=GFlowNetRolloutConfig(max_molecules_per_sequence=3),
+            replay=ReplayConfig(enabled=False),
+        ),
+        device=torch.device("cpu"),
+    )
+
+    trajectories = trainer.collect_on_policy_trajectories(
+        [{"id": "a"}, {"id": "b"}, {"id": "c"}],
+        iteration_index=1,
+    )
+
+    assert len(trajectories) == 3
+    assert sampled_example_ids == [
+        "iter-0001-sample-0000-a",
+        "iter-0001-sample-0001-b",
+    ]
+
+
 def test_train_iteration_mixes_on_policy_and_target_guided_sources(monkeypatch) -> None:
     class DummyModel(torch.nn.Module):
         def __init__(self) -> None:
