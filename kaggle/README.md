@@ -77,10 +77,11 @@ Exception:
    - uses `/kaggle/working/Thesis` and `scripts/init_kaggle.py --stage gflownet`
    - prepares the upstream LPM24 SFT checkpoint from `GFLOWNET_CHECKPOINT_DOWNLOAD_SOURCE`
    - downloads LPM24 if the processed files are missing, then runs `scripts/prepare_lpm24_training_splits.py`
-   - exposes the baseline DB, beam rollout, target-guidance, replay, reward, and two-GPU parallel-training knobs in one parameter cell
+   - defaults to a DB objective, sample-rollout, experimental TB-mixture replay ablation with two-GPU parallel training
+   - exposes target-guidance, replay-source, reward, rollout, and parallel-training knobs in one parameter cell
    - reads W&B credentials only from `WANDB_API_KEY` in the notebook environment
-   - writes training outputs under `/kaggle/working/Thesis/outputs/kaggle/train_gflownet_lpm24_ablation/<run_name>/`
-   - exports `thesis_artifacts/train_gflownet_lpm24_ablation/` and `thesis_artifacts/train_gflownet_lpm24_ablation.zip`
+   - writes training outputs under `/kaggle/working/Thesis/outputs/kaggle/train_gflownet_lpm24_v241_ablation/<run_name>/`
+   - exports `thesis_artifacts/train_gflownet_lpm24_v241_ablation/` and `thesis_artifacts/train_gflownet_lpm24_v241_ablation.zip`
 
 ## Zipped Part Tutorial
 
