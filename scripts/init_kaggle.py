@@ -11,7 +11,10 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from kaggle.thesis_kaggle_support import KAGGLE_REPO_DIR
 from kaggle.thesis_kaggle_support import get_bootstrap_environment
-from src.checkpoint_bootstrap import build_ppo_checkpoint_prep_command
+from src.checkpoint_bootstrap import (
+    build_gflownet_checkpoint_prep_command,
+    build_ppo_checkpoint_prep_command,
+)
 from src.runtime_bootstrap import (
     DEFAULT_REPO_BRANCH,
     DEFAULT_REPO_URL,
@@ -66,6 +69,13 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional Google Drive file id or share URL for a zipped PPO checkpoint bundle.",
     )
+    parser.add_argument(
+        "--gflownet-checkpoint-download-source",
+        "--gflownet-checkpoint-source",
+        dest="gflownet_checkpoint_download_source",
+        default=None,
+        help="Optional Google Drive file id or share URL for a zipped GFlowNet upstream checkpoint bundle.",
+    )
     return parser.parse_args()
 
 
@@ -102,18 +112,27 @@ def main() -> None:
         run_command(dataset_command, cwd=repo_dir)
 
     checkpoint_kind, checkpoint_command, checkpoint_target = ("not_applicable", None, None)
+    checkpoint_download_source_provided = False
     if stage_spec.stage == "ppo":
         checkpoint_kind, checkpoint_command, checkpoint_target = build_ppo_checkpoint_prep_command(
             repo_dir=repo_dir,
             config_path=config_path,
             checkpoint_download_source=args.ppo_checkpoint_download_source,
         )
+        checkpoint_download_source_provided = bool(str(args.ppo_checkpoint_download_source or "").strip())
+    elif stage_spec.stage == "gflownet":
+        checkpoint_kind, checkpoint_command, checkpoint_target = build_gflownet_checkpoint_prep_command(
+            repo_dir=repo_dir,
+            config_path=config_path,
+            checkpoint_download_source=args.gflownet_checkpoint_download_source,
+        )
+        checkpoint_download_source_provided = bool(str(args.gflownet_checkpoint_download_source or "").strip())
     print_json_status(
         "checkpoint_plan",
         stage=args.stage,
         checkpoint_kind=checkpoint_kind,
         checkpoint_target=checkpoint_target,
-        checkpoint_download_source_provided=bool(str(args.ppo_checkpoint_download_source or "").strip()),
+        checkpoint_download_source_provided=checkpoint_download_source_provided,
     )
     if checkpoint_command is not None:
         try:
