@@ -370,6 +370,85 @@ def test_parallel_score_trajectories_splits_microbatches_and_preserves_order() -
     assert [len(call) for call in trainer.parallel_models[1].calls] == [2]
 
 
+def test_parallel_score_microbatches_moves_inputs_to_shard_device(monkeypatch) -> None:
+    requested_tensor_devices: list[tuple[str, str]] = []
+    requested_prefix_devices: list[str] = []
+
+    class DeviceRecordingTensor:
+        def __init__(self, tensor: torch.Tensor, name: str) -> None:
+            self.tensor = tensor
+            self.name = name
+
+        def to(self, device: torch.device) -> torch.Tensor:
+            requested_tensor_devices.append((self.name, str(device)))
+            return self.tensor
+
+    class DeviceRecordingTokenizer(_BatchScoringTokenizer):
+        def __call__(self, text, **kwargs):
+            encoded = super().__call__(text, **kwargs)
+            if isinstance(text, list):
+                return {
+                    "input_ids": DeviceRecordingTensor(encoded["input_ids"], "input_ids"),
+                    "attention_mask": DeviceRecordingTensor(
+                        encoded["attention_mask"],
+                        "attention_mask",
+                    ),
+                }
+            return encoded
+
+    def fake_encode_decoder_prefix(
+        tokenizer,
+        prefix_text: str,
+        *,
+        decoder_start_token_id: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        del tokenizer, prefix_text
+        requested_prefix_devices.append(str(device))
+        return torch.tensor([[decoder_start_token_id]], dtype=torch.long)
+
+    monkeypatch.setattr(
+        "post_training.gflownet.trainer.encode_decoder_prefix",
+        fake_encode_decoder_prefix,
+    )
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=DeviceRecordingTokenizer(),
+        config=GFlowNetConfig(
+            scoring_microbatch_size=1,
+            parallel_training=ParallelTrainingConfig(
+                enabled=True,
+                devices=("cpu:0", "cpu:1"),
+                strict=False,
+            ),
+        ),
+        device=torch.device("cpu"),
+    )
+    trajectories = [
+        _make_sampled_trajectory(
+            rollout_id=f"parallel-device-{index}",
+            prompt_text=f"prompt-{index}",
+            terminal_reward=1.0,
+            action_token_ids=(10 + index,),
+        )
+        for index in range(4)
+    ]
+
+    trainer.score_trajectories(trajectories)
+
+    assert requested_tensor_devices == [
+        ("input_ids", "cpu:0"),
+        ("attention_mask", "cpu:0"),
+        ("input_ids", "cpu:0"),
+        ("attention_mask", "cpu:0"),
+        ("input_ids", "cpu:1"),
+        ("attention_mask", "cpu:1"),
+        ("input_ids", "cpu:1"),
+        ("attention_mask", "cpu:1"),
+    ]
+    assert requested_prefix_devices == ["cpu:0", "cpu:0", "cpu:1", "cpu:1"]
+
+
 @pytest.mark.parametrize("objective", ["tb", "db", "subtb"])
 def test_objective_loss_is_scoring_microbatch_invariant(objective: str) -> None:
     trajectories = [

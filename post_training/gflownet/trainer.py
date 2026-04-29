@@ -613,19 +613,19 @@ class MultiMoleculeGFlowNetTrainer:
                 max_length=self.config.rollout.max_source_length,
                 return_tensors="pt",
             )
-            prompt_input_ids = prompt_inputs["input_ids"].to(self.device)
+            prompt_input_ids = prompt_inputs["input_ids"].to(device)
             prompt_attention_mask = prompt_inputs.get("attention_mask")
             if prompt_attention_mask is None:
                 prompt_attention_mask = torch.ones_like(prompt_input_ids)
             else:
-                prompt_attention_mask = prompt_attention_mask.to(self.device)
+                prompt_attention_mask = prompt_attention_mask.to(device)
 
             decoder_prefix_ids = [
                 encode_decoder_prefix(
                     self.tokenizer,
                     trajectory.decoder_prefix_text,
                     decoder_start_token_id=decoder_start_token_id,
-                    device=self.device,
+                    device=device,
                 )
                 for trajectory in trajectory_batch
             ]
