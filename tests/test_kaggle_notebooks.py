@@ -67,7 +67,11 @@ def test_kaggle_lpm24_gflownet_ablation_notebook_uses_kaggle_bootstrap_and_artif
     assert "ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK = False" in parameter_cell
     assert "PARALLEL_TRAINING_ENABLED = True" in parameter_cell
     assert 'PARALLEL_TRAINING_DEVICES = ["cuda:0", "cuda:1"]' in parameter_cell
-    assert 'GFLOWNET_CHECKPOINT_DOWNLOAD_SOURCE = "1jCIVYbzgTw7xQAWvv6SfwM8Y1vL47PDg"' in parameter_cell
+    assert 'GFLOWNET_CHECKPOINT_DOWNLOAD_SOURCE = ""' in parameter_cell
+    assert 'GFLOWNET_RESTART_CHECKPOINT_SOURCE = "1eXqmu4HfPS1Gc2I3AjZR2w0pC2dfnO4E"' in parameter_cell
+    assert 'RESTART_CHECKPOINT_ROOT = REPO_DIR / "outputs" / "kaggle" / "restart_checkpoints"' in parameter_cell
+    assert 'RESTART_CHECKPOINT_ZIP = RESTART_CHECKPOINT_ROOT / "best.zip"' in parameter_cell
+    assert 'RESTART_CHECKPOINT_DIR = RESTART_CHECKPOINT_ROOT / "best"' in parameter_cell
 
     assert "scripts/download_lpm24.py" in bootstrap_cell
     assert "scripts/prepare_lpm24_training_splits.py" in bootstrap_cell
@@ -77,6 +81,16 @@ def test_kaggle_lpm24_gflownet_ablation_notebook_uses_kaggle_bootstrap_and_artif
     assert 'tracking_payload["tags"]' in train_cell
     assert "GFLOWNET_VERSION" in train_cell
     assert '"parallel_training"' in train_cell
+    assert "scripts/prepare_gflownet_restart_checkpoint.py" in train_cell
+    assert "GFLOWNET_RESTART_CHECKPOINT_SOURCE" in train_cell
+    assert 'runtime_config.setdefault("model", {})["checkpoint"] = restart_metadata["checkpoint_dir"]' in train_cell
+    assert 'gflownet_payload["learning_rate"] = float(restart_metadata["learning_rate"])' in train_cell
+    assert 'gflownet_payload["start_iteration"] = int(restart_metadata["restart_iteration"])' in train_cell
+    assert '"gflownet_start_iteration": runtime_config["gflownet"].get("start_iteration")' in train_cell
+    assert '"restart_checkpoint_dir": restart_checkpoint_metadata.get("checkpoint_dir")' in train_cell
+    assert '"restart_learning_rate_source": restart_checkpoint_metadata.get("learning_rate_source_path")' in train_cell
+    assert '"restart_iteration": restart_checkpoint_metadata.get("restart_iteration")' in train_cell
+    assert '"restart_next_iteration": restart_checkpoint_metadata.get("next_iteration")' in train_cell
     assert 'rollout_payload["decoding_strategy"] = ROLLOUT_DECODING_STRATEGY' in train_cell
     assert 'rollout_payload["num_beams"] = int(ROLLOUT_NUM_BEAMS)' in train_cell
     assert 'target_guidance_payload["enabled"] = bool(TARGET_GUIDANCE_ENABLED)' in train_cell
@@ -107,6 +121,10 @@ def test_kaggle_lpm24_gflownet_ablation_notebook_uses_kaggle_bootstrap_and_artif
     assert '"gflownet_version": GFLOWNET_VERSION' in export_cell
     assert '"repo_branch": REPO_BRANCH' in export_cell
     assert '"parallel_training": {' in export_cell
+    assert '"restart_checkpoint": {' in export_cell
+    assert '"learning_rate_source_path": restart_checkpoint_metadata.get("learning_rate_source_path")' in export_cell
+    assert '"restart_iteration": restart_checkpoint_metadata.get("restart_iteration")' in export_cell
+    assert '"next_iteration": restart_checkpoint_metadata.get("next_iteration")' in export_cell
     assert '"output": OUTPUT_DIR' in export_cell
     assert '"run_summary.json": RUN_SUMMARY_PATH' in export_cell
     assert '"validation_evaluation_metrics.json": EVAL_OUTPUT_PATH' in export_cell

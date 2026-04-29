@@ -19,6 +19,7 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     config = GFlowNetConfig.from_dict(
         {
             "seed": 99,
+            "start_iteration": 1500,
             "objective": "db",
             "max_optimization_trajectories_per_iter": 16,
             "scoring_microbatch_size": 3,
@@ -62,6 +63,7 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     )
 
     assert config.seed == 99
+    assert config.start_iteration == 1500
     assert config.objective == "db"
     assert config.max_optimization_trajectories_per_iter == 16
     assert config.scoring_microbatch_size == 3
@@ -103,6 +105,7 @@ def test_gflownet_config_from_dict_supports_stage_rollout_and_bounded_replay() -
     assert config.parallel_training.strict is True
     assert config.to_dict()["max_optimization_trajectories_per_iter"] == 16
     assert config.to_dict()["scoring_microbatch_size"] == 3
+    assert config.to_dict()["start_iteration"] == 1500
     assert config.to_dict()["target_guidance"]["shuffle_target_selfies_list"] is True
     assert config.to_dict()["parallel_training"]["enabled"] is False
 
@@ -154,6 +157,19 @@ def test_gflownet_config_from_dict_parses_warmup_ratio() -> None:
 
     assert config.warmup_ratio == 0.03
     assert config.to_dict()["warmup_ratio"] == 0.03
+
+
+def test_gflownet_config_from_dict_parses_start_iteration() -> None:
+    config = GFlowNetConfig.from_dict({"start_iteration": 1500})
+
+    assert config.start_iteration == 1500
+    assert config.to_dict()["start_iteration"] == 1500
+
+
+def test_gflownet_config_from_dict_clamps_start_iteration_to_non_negative() -> None:
+    config = GFlowNetConfig.from_dict({"start_iteration": -10})
+
+    assert config.start_iteration == 0
 
 
 def test_gflownet_config_from_dict_clamps_warmup_ratio() -> None:

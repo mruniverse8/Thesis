@@ -113,6 +113,7 @@ def test_new_bootstrap_scripts_import_cleanly() -> None:
         Path("scripts") / "download_ppo_checkpoint.py",
         Path("scripts") / "init_colab.py",
         Path("scripts") / "init_kaggle.py",
+        Path("scripts") / "prepare_gflownet_restart_checkpoint.py",
         Path("scripts") / "train_multi_molecule_gflownet.py",
     ):
         script_path = project_root / relative_path

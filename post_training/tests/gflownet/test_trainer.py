@@ -626,6 +626,22 @@ def test_scheduled_learning_rate_stays_constant_without_warmup() -> None:
     assert trainer._scheduled_learning_rate(50) == pytest.approx(1.0e-6)
 
 
+def test_scheduled_learning_rate_uses_absolute_iteration_for_restart_warmup() -> None:
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            start_iteration=1500,
+            gflownet_iterations=100,
+            learning_rate=1.0e-6,
+            warmup_ratio=0.03,
+        ),
+        device=torch.device("cpu"),
+    )
+
+    assert trainer._scheduled_learning_rate(1501) == pytest.approx(1.0e-6)
+
+
 def test_train_iteration_reports_current_scheduled_learning_rate(monkeypatch) -> None:
     trainer = MultiMoleculeGFlowNetTrainer(
         model=_RecordingScoreModel(),
@@ -651,6 +667,71 @@ def test_train_iteration_reports_current_scheduled_learning_rate(monkeypatch) ->
     assert warmup_result.metrics["learning_rate"] == pytest.approx(6.0e-6)
     assert post_warmup_result.metrics["learning_rate"] == pytest.approx(9.0e-6)
     assert trainer.optimizer.param_groups[0]["lr"] == pytest.approx(9.0e-6)
+
+
+def test_train_iteration_saves_final_additional_iteration_with_absolute_index(
+    monkeypatch,
+) -> None:
+    trainer = MultiMoleculeGFlowNetTrainer(
+        model=_RecordingScoreModel(),
+        tokenizer=_BatchScoringTokenizer(),
+        config=GFlowNetConfig(
+            start_iteration=1500,
+            gflownet_iterations=2,
+            learning_rate=1.0e-6,
+            warmup_ratio=0.03,
+            save_every_iterations=999,
+            replay=ReplayConfig(enabled=False),
+            target_guidance=TargetGuidanceConfig(enabled=False),
+        ),
+        device=torch.device("cpu"),
+    )
+    trajectory = _make_sampled_trajectory(
+        rollout_id="restart-trajectory",
+        terminal_reward=2.0,
+    )
+
+    monkeypatch.setattr(
+        trainer,
+        "collect_on_policy_trajectories",
+        lambda _examples, *, iteration_index: [trajectory],
+    )
+
+    def fake_score(trajectories):
+        base = trainer.model.weight
+        return [
+            ScoredStageTrajectory(
+                sampled=item,
+                log_pf_tokens=tuple(base * 0.1 for _ in item.action_token_ids),
+                log_stop=tuple(base * -0.2 for _ in range(len(item.action_token_ids) + 1)),
+                log_state_flows=tuple(
+                    base * 0.3 for _ in range(len(item.action_token_ids) + 1)
+                ),
+            )
+            for item in trajectories
+        ]
+
+    saved_iterations: list[tuple[int, float]] = []
+    monkeypatch.setattr(trainer, "score_trajectories", fake_score)
+    monkeypatch.setattr(
+        trainer,
+        "save_checkpoint",
+        lambda **kwargs: saved_iterations.append(
+            (
+                int(kwargs["iteration_index"]),
+                float(kwargs["metrics"]["iteration"]),
+            )
+        ),
+    )
+    monkeypatch.setattr(trainer, "save_best_checkpoint", lambda **kwargs: None)
+
+    first_result = trainer.train_iteration([{"id": "example-1"}], iteration_index=1501)
+    final_result = trainer.train_iteration([{"id": "example-1"}], iteration_index=1502)
+
+    assert first_result.metrics["iteration"] == pytest.approx(1501.0)
+    assert final_result.metrics["iteration"] == pytest.approx(1502.0)
+    assert final_result.metrics["learning_rate"] == pytest.approx(1.0e-6)
+    assert saved_iterations == [(1502, 1502.0)]
 
 
 @pytest.mark.parametrize(
@@ -1547,6 +1628,48 @@ def test_run_multi_molecule_gflownet_uses_epoch_batches_for_configured_iteration
     ]
     assert set(first_epoch_ids) == {"example-0", "example-1", "example-2"}
     assert summary["num_iterations"] == 5
+
+    trainer_instances.clear()
+    restart_config = resolve_gflownet_config_paths(
+        {
+            "seed": 123,
+            "tracking": {"enabled": False},
+            "model": {"checkpoint": DEFAULT_PPO_FALLBACK_CHECKPOINT, "use_lora": False},
+            "data": {
+                "train_file": "data/train_multimol.jsonl",
+                "validation_file": "data/validation_multimol.jsonl",
+                "test_file": "data/test_multimol.jsonl",
+                "max_source_length": 512,
+            },
+            "training": {
+                "output_dir": str(output_dir),
+                "device": "cpu",
+                "save_every_iterations": 10,
+            },
+            "gflownet": {
+                "start_iteration": 1500,
+                "gflownet_iterations": 2,
+                "batch_size": 2,
+                "objective": "tb",
+                "rollout": {"constrained_decoding": False},
+            },
+        },
+        project_root=tmp_path,
+    )
+
+    restart_summary = run_multi_molecule_gflownet(restart_config)
+
+    assert [iteration for iteration, _examples in trainer_instances[0].calls] == [
+        1501,
+        1502,
+    ]
+    assert [record["iteration"] for record in restart_summary["history"]] == [
+        1501.0,
+        1502.0,
+    ]
+    assert restart_summary["start_iteration"] == 1500
+    assert restart_summary["final_iteration"] == 1502
+    assert restart_summary["num_iterations"] == 2
 
 
 def test_run_multi_molecule_gflownet_uses_resolved_checkpoint_source_for_all_model_loads(

@@ -97,6 +97,7 @@ class ParallelTrainingConfig:
 class GFlowNetConfig:
     output_dir: str = "outputs/post_training_gflownet"
     seed: int = 42
+    start_iteration: int = 0
     gflownet_iterations: int = 200
     batch_size: int = 64
     max_optimization_trajectories_per_iter: int | None = None
@@ -190,6 +191,10 @@ class GFlowNetConfig:
         return cls(
             output_dir=str(payload.get("output_dir", cls.output_dir)),
             seed=int(payload.get("seed", cls.seed)),
+            start_iteration=max(
+                0,
+                int(payload.get("start_iteration", cls.start_iteration)),
+            ),
             gflownet_iterations=int(
                 payload.get("gflownet_iterations", cls.gflownet_iterations)
             ),
