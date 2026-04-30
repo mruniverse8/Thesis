@@ -236,7 +236,7 @@ def test_colab_lpm24_gflownet_notebook_prepares_manual_dataset_and_runs_train_sc
     assert "resolved_checkpoint_source" in post_cell
 
 
-def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> None:
+def test_colab_lpm24_gflownet_06_v2_notebook_uses_restart_checkpoint_and_rollout_controls() -> None:
     notebook = _load_notebook("colab/06_v2_train_multi_molecule_gflownet_lpm24.ipynb")
 
     assert notebook["nbformat"] == 4
@@ -249,28 +249,32 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
     eval_cell = _joined_source(notebook["cells"][6])
     post_cell = _joined_source(notebook["cells"][7])
 
-    assert "manual constrained beam-search rollout" in first_cell
+    assert "manual constrained rollout" in first_cell
     assert "gflownet_v2.4" in first_cell
-    assert 'REPO_BRANCH = "gflownet_v2.4"' in setup_cell
-    assert 'ROLLOUT_DECODING_STRATEGY = "beam"' in parameter_cell
-    assert "ROLLOUT_NUM_BEAMS = 2" in parameter_cell
+    assert 'REPO_BRANCH = "gflownet_v2.4.e"' in setup_cell
+    assert 'GFLOWNET_RESTART_CHECKPOINT_SOURCE = "1Wldk_t5Nj2Ov-tJQJal_Oc2ZgB5SXaxp"' in parameter_cell
+    assert "RESTART_CHECKPOINT_ZIP" in parameter_cell
+    assert "RESTART_CHECKPOINT_DIR" in parameter_cell
+    assert 'ROLLOUT_DECODING_STRATEGY = "sample"' in parameter_cell
+    assert "ROLLOUT_NUM_BEAMS = 1" in parameter_cell
     assert "ROLLOUT_LENGTH_PENALTY = 1.0" in parameter_cell
     assert "ROLLOUT_EARLY_STOPPING = True" in parameter_cell
     assert "MAX_OPTIMIZATION_TRAJECTORIES_PER_ITER = 42" in parameter_cell
-    assert "GFLOWNET_SCORING_MICROBATCH_SIZE = 8" in parameter_cell
+    assert "GFLOWNET_SCORING_MICROBATCH_SIZE = 16" in parameter_cell
     assert "GFLOWNET_LEARNING_RATE = 1e-6" in parameter_cell
     assert "GFLOWNET_WARMUP_RATIO = 0.03" in parameter_cell
     assert "TARGET_GUIDANCE_ENABLED = True" in parameter_cell
-    assert "TARGET_GUIDANCE_ON_POLICY_FRACTION = 0.25" in parameter_cell
-    assert "TARGET_GUIDANCE_PREFIX_FRACTION = 0.50" in parameter_cell
+    assert "TARGET_GUIDANCE_ON_POLICY_FRACTION = 0.50" in parameter_cell
+    assert "TARGET_GUIDANCE_PREFIX_FRACTION = 0.25" in parameter_cell
     assert "TARGET_GUIDANCE_TEACHER_FRACTION = 0.25" in parameter_cell
     assert "REPLAY_ENABLED = False" in parameter_cell
     assert 'REPLAY_BUFFER_TYPE = "experimental_mixture"' in parameter_cell
     assert "REPLAY_FRACTION = 0.75" in parameter_cell
     assert "GFLOWNET_REPORT_METRICS_PATH" in parameter_cell
     assert "ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK = False" in parameter_cell
-    assert "beam rollout is controlled by the beam settings above" in parameter_cell
+    assert "active sampling behavior is controlled by rollout settings above" in parameter_cell
     assert '"gflownet_warmup_ratio": GFLOWNET_WARMUP_RATIO' in parameter_cell
+    assert '"gflownet_restart_checkpoint_source_configured": bool(GFLOWNET_RESTART_CHECKPOINT_SOURCE.strip())' in parameter_cell
     assert '"rollout_decoding_strategy": ROLLOUT_DECODING_STRATEGY' in parameter_cell
     assert '"rollout_num_beams": ROLLOUT_NUM_BEAMS' in parameter_cell
     assert '"rollout_length_penalty": ROLLOUT_LENGTH_PENALTY' in parameter_cell
@@ -280,6 +284,33 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
         "ENABLE_INVALID_SIMILARITY_NGRAM_FALLBACK"
     ) in parameter_cell
 
+    assert "scripts/upload_adapters.py" in run_cell
+    assert "GFLOWNET_RESTART_CHECKPOINT_SOURCE.strip()" in run_cell
+    assert '"--upstream-checkpoint"' in run_cell
+    assert '"--default-base-model"' in run_cell
+    assert '"--skip-existing"' in run_cell
+    assert '"--fallback-learning-rate"' in run_cell
+    assert "str(GFLOWNET_LEARNING_RATE)" in run_cell
+    assert "subprocess.check_output" not in run_cell
+    assert "stderr=subprocess.STDOUT" in run_cell
+    assert "Restart checkpoint preparation failed" in run_cell
+    assert "restart_checkpoint_payload = json.loads(restart_output)" in run_cell
+    assert (
+        'restart_artifact_kind = restart_checkpoint_payload.get("artifact_kind", "full_checkpoint")'
+        in run_cell
+    )
+    assert "UPSTREAM_CHECKPOINT.exists()" in run_cell
+    assert "DEFAULT_PPO_FALLBACK_CHECKPOINT" in run_cell
+    assert '"restart_reused_existing": restart_checkpoint_payload.get("reused_existing")' in run_cell
+    assert (
+        '"restart_source_metadata_path": restart_checkpoint_payload.get("restart_source_metadata_path")'
+        in run_cell
+    )
+    assert '"resolved_restart_merge_base_source": resolved_restart_merge_base_source' in run_cell
+    assert "scripts/prepare_gflownet_restart_checkpoint.py" not in run_cell
+    assert "adapter_config.json" not in run_cell
+    assert "PeftModel.from_pretrained" not in run_cell
+    assert 'runtime_config.setdefault("model", {})["checkpoint"] = restart_checkpoint_payload["checkpoint_dir"]' in run_cell
     assert 'rollout_payload["decoding_strategy"] = ROLLOUT_DECODING_STRATEGY' in run_cell
     assert 'rollout_payload["num_beams"] = int(ROLLOUT_NUM_BEAMS)' in run_cell
     assert 'rollout_payload["length_penalty"] = float(ROLLOUT_LENGTH_PENALTY)' in run_cell
@@ -288,7 +319,8 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
         'gflownet_payload["max_optimization_trajectories_per_iter"] = '
         "int(MAX_OPTIMIZATION_TRAJECTORIES_PER_ITER)"
     ) in run_cell
-    assert 'gflownet_payload["learning_rate"] = float(GFLOWNET_LEARNING_RATE)' in run_cell
+    assert 'gflownet_payload["learning_rate"] = float(restart_checkpoint_payload["learning_rate"])' in run_cell
+    assert 'gflownet_payload["start_iteration"] = int(restart_checkpoint_payload["restart_iteration"])' in run_cell
     assert 'gflownet_payload["warmup_ratio"] = float(GFLOWNET_WARMUP_RATIO)' in run_cell
     assert 'target_guidance_payload["enabled"] = bool(TARGET_GUIDANCE_ENABLED)' in run_cell
     assert (
@@ -318,6 +350,10 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
         'gflownet_payload.get("max_optimization_trajectories_per_iter")'
     ) in run_cell
     assert '"gflownet_warmup_ratio": gflownet_payload.get("warmup_ratio")' in run_cell
+    assert '"gflownet_start_iteration": gflownet_payload.get("start_iteration")' in run_cell
+    assert '"gflownet_next_iteration": restart_checkpoint_payload.get("next_iteration")' in run_cell
+    assert '"restart_learning_rate_source_path": restart_checkpoint_payload.get("learning_rate_source_path")' in run_cell
+    assert '"resolved_restart_merge_base": resolved_restart_merge_base' in run_cell
     assert '"target_guidance_enabled": target_guidance_payload.get("enabled")' in run_cell
     assert (
         '"target_guidance_on_policy_fraction": '
@@ -328,11 +364,16 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
         'reward_payload.get("enable_invalid_similarity_ngram_fallback")'
     ) in run_cell
     assert '"gflownet_report_metrics_path": str(GFLOWNET_REPORT_METRICS_PATH)' in post_cell
+    assert '"restart_start_iteration": summary_payload.get("start_iteration")' in post_cell
+    assert '"restart_final_iteration": summary_payload.get("final_iteration")' in post_cell
 
     assert "validation_evaluation_metrics.json" in eval_cell
     assert "evaluate_generation_groups" in eval_cell
     assert "evaluation_diagnosis" in eval_cell
     assert "eval/novelty_fraction" in eval_cell
+    assert "rollout_stage_metrics" in eval_cell
+    assert "mean_trajectory_length" in eval_cell
+    assert "eval/mean_trajectory_length" in eval_cell
     assert "wandb.log(evaluation_diagnosis)" in eval_cell
 
 
@@ -378,8 +419,8 @@ def test_colab_lpm24_sft_07_notebook_evaluates_checkpoint_without_post_training(
     setup_cell = _joined_source(notebook["cells"][1])
     wandb_cell = _joined_source(notebook["cells"][4])
 
-    assert "gflownet_v2.3" in first_cell
-    assert 'REPO_BRANCH = "gflownet_v2.3"' in setup_cell
+    assert "gflownet_v2.4" in first_cell
+    assert 'REPO_BRANCH = "gflownet_v2.4.e"' in setup_cell
     assert "T5ForConditionalGeneration" in all_source
     assert "scripts/train_multi_molecule_gflownet.py" not in all_source
     assert "WANDB_API_KEY =" in wandb_cell
@@ -391,9 +432,142 @@ def test_colab_lpm24_sft_07_notebook_evaluates_checkpoint_without_post_training(
     assert "parse_staged_target" in all_source
     assert "sft_validation_evaluation_metrics.json" in all_source
     assert "sft_processed_test_evaluation_metrics.json" in all_source
-    assert "GENERATION_NUM_RETURN_SEQUENCES = 8" in all_source
+    assert "GENERATION_NUM_BEAMS = 4" in all_source
+    assert "GENERATION_NUM_RETURN_SEQUENCES = 4" in all_source
+    assert "num_beams=int(GENERATION_NUM_BEAMS)" in all_source
     assert "num_return_sequences=int(GENERATION_NUM_RETURN_SEQUENCES)" in all_source
     assert "eval/novelty_fraction" in all_source
+    assert "eval/valid_fraction" in all_source
+    assert "eval/internal_diversity" in all_source
+    assert "eval/mean_max_dice_similarity" in all_source
+    assert "prefix_valid_fraction" in all_source
+    assert "prefix_duplicate_fraction" in all_source
+    assert "prefix_duplicate_valid_fraction" in all_source
+    assert "prefix_average_max_dice_similarity" in all_source
+    assert "prefix_accepted_unique_internal_diversity" in all_source
+    assert "prefix_valid_internal_diversity" in all_source
+    assert "mean_group_valid_fraction" not in all_source
+    assert "mean_group_duplicate_valid_fraction" not in all_source
+    assert "mean_group_internal_diversity" not in all_source
+    assert "mean_generated_stage_count" in all_source
+    assert "eval/mean_generated_stage_count" in all_source
+    assert "mean_trajectory_length" in all_source
+    assert "eval/mean_trajectory_length" in all_source
+    assert "print(progress_metrics)" in all_source
+    assert "wandb.log(progress_metrics, step=evaluated_examples)" in all_source
+    assert "print(evaluation_diagnosis)" in all_source
+    assert "wandb.log(evaluation_diagnosis, step=len(groups))" in all_source
+
+
+def test_colab_lpm24_gflownet_07_v2_notebook_evaluates_validation_and_processed_test() -> None:
+    notebook = _load_notebook("colab/07_v2_evaluate_multi_molecule_gflownet_lpm24.ipynb")
+
+    assert notebook["nbformat"] == 4
+    assert len(notebook["cells"]) == 10
+
+    all_source = "\n".join(_joined_source(cell) for cell in notebook["cells"])
+    first_cell = _joined_source(notebook["cells"][0])
+    setup_cell = _joined_source(notebook["cells"][1])
+    parameter_cell = _joined_source(notebook["cells"][2])
+    wandb_cell = _joined_source(notebook["cells"][4])
+    run_cell = _joined_source(notebook["cells"][6])
+
+    assert "Evaluate Multi-Molecule GFlowNet On LPM24" in first_cell
+    assert "gflownet_v2.4" in first_cell
+    assert 'REPO_BRANCH = "gflownet_v2.4.e"' in setup_cell
+    assert 'CONFIG_OVERRIDE = Path("configs/multi_molecule_gflownet_lpm24.yaml")' in parameter_cell
+    assert 'GFLOWNET_RESTART_CHECKPOINT_SOURCE = "1Wldk_t5Nj2Ov-tJQJal_Oc2ZgB5SXaxp"' in parameter_cell
+    assert 'RESTART_CHECKPOINT_DIR = REPO_DIR / "outputs" / "gflownet_restart_checkpoint" / "best"' in parameter_cell
+    assert 'RESTART_CHECKPOINT_ZIP = RESTART_CHECKPOINT_DIR.with_suffix(".zip")' in parameter_cell
+    assert "GFLOWNET_FALLBACK_LEARNING_RATE = 1e-6" in parameter_cell
+    assert 'ROLLOUT_DECODING_STRATEGY = "sample"' in parameter_cell
+    assert "ROLLOUT_NUM_BEAMS = 1" in parameter_cell
+    assert "ROLLOUT_LENGTH_PENALTY = 1.0" in parameter_cell
+    assert "ROLLOUT_EARLY_STOPPING = True" in parameter_cell
+    assert "ROLLOUT_TEMPERATURE = 0.08" in parameter_cell
+    assert "ROLLOUT_TOP_P = 0.25" in parameter_cell
+    assert "EVAL_BATCH_SIZE = 8" in parameter_cell
+    assert '# ROLLOUT_DECODING_STRATEGY = "beam"' in parameter_cell
+    assert '"eval_batch_size": EVAL_BATCH_SIZE' in parameter_cell
+    assert '"rollout_decoding_strategy": ROLLOUT_DECODING_STRATEGY' in parameter_cell
+    assert '"rollout_num_beams": ROLLOUT_NUM_BEAMS' in parameter_cell
+    assert '"rollout_length_penalty": ROLLOUT_LENGTH_PENALTY' in parameter_cell
+    assert '"rollout_early_stopping": ROLLOUT_EARLY_STOPPING' in parameter_cell
+    assert '"rollout_temperature": ROLLOUT_TEMPERATURE' in parameter_cell
+    assert '"rollout_top_p": ROLLOUT_TOP_P' in parameter_cell
+    assert 'VALIDATION_METRICS_PATH = DIAGNOSTICS_DIR / "gflownet_validation_evaluation_metrics.json"' in parameter_cell
+    assert 'VALIDATION_GENERATIONS_PATH = DIAGNOSTICS_DIR / "gflownet_validation_generations.jsonl"' in parameter_cell
+    assert 'VALIDATION_PROGRESS_METRICS_PATH = DIAGNOSTICS_DIR / "gflownet_validation_progress_metrics.jsonl"' in parameter_cell
+    assert 'PROCESSED_TEST_METRICS_PATH = DIAGNOSTICS_DIR / "gflownet_processed_test_evaluation_metrics.json"' in parameter_cell
+    assert 'PROCESSED_TEST_GENERATIONS_PATH = DIAGNOSTICS_DIR / "gflownet_processed_test_generations.jsonl"' in parameter_cell
+    assert 'PROCESSED_TEST_PROGRESS_METRICS_PATH = DIAGNOSTICS_DIR / "gflownet_processed_test_progress_metrics.jsonl"' in parameter_cell
+    assert '"gflownet_restart_checkpoint_source_configured": bool(GFLOWNET_RESTART_CHECKPOINT_SOURCE.strip())' in parameter_cell
+    assert "WANDB_API_KEY =" in wandb_cell
+    assert "wandb.login(key=WANDB_API_KEY, relogin=True)" in wandb_cell
+    assert "scripts/upload_adapters.py" in all_source
+    assert '"--skip-existing"' in all_source
+    assert "restart_checkpoint_payload = json.loads(restart_output)" in all_source
+    assert 'checkpoint_for_eval = Path(restart_checkpoint_payload["checkpoint_dir"])' in all_source
+    assert "restart_source_metadata_path" in all_source
+    assert "resolved_restart_merge_base_source" in all_source
+    assert "CHECKPOINT_FOR_EVAL" not in all_source
+    assert "GFlowNetModel" in all_source
+    assert "build_gflownet_config" in all_source
+    assert "build_reward_config" in all_source
+    assert 'rollout_payload["decoding_strategy"] = ROLLOUT_DECODING_STRATEGY' in run_cell
+    assert 'rollout_payload["num_beams"] = int(ROLLOUT_NUM_BEAMS)' in run_cell
+    assert 'rollout_payload["length_penalty"] = float(ROLLOUT_LENGTH_PENALTY)' in run_cell
+    assert 'rollout_payload["early_stopping"] = bool(ROLLOUT_EARLY_STOPPING)' in run_cell
+    assert 'rollout_payload["temperature"] = float(ROLLOUT_TEMPERATURE)' in run_cell
+    assert 'rollout_payload["top_p"] = float(ROLLOUT_TOP_P)' in run_cell
+    assert 'gflownet_payload["rollout"] = rollout_payload' in run_cell
+    assert 'eval_config["gflownet"] = gflownet_payload' in run_cell
+    assert '"rollout_decoding_strategy": gflownet_config.rollout.decoding_strategy' in run_cell
+    assert '"rollout_num_beams": gflownet_config.rollout.num_beams' in run_cell
+    assert '"rollout_length_penalty": gflownet_config.rollout.length_penalty' in run_cell
+    assert '"rollout_early_stopping": gflownet_config.rollout.early_stopping' in run_cell
+    assert '"rollout_temperature": gflownet_config.rollout.temperature' in run_cell
+    assert '"rollout_top_p": gflownet_config.rollout.top_p' in run_cell
+    assert "from notebooks.gflownet_eval_streaming import (" in all_source
+    assert "IncrementalGenerationMetrics" in all_source
+    assert "IncrementalRolloutMetrics" in all_source
+    assert "sample_stage_trajectories_for_examples" in all_source
+    assert "trajectory_batches = sample_stage_trajectories_for_examples(" in all_source
+    assert "list(_batched(examples, EVAL_BATCH_SIZE))" in all_source
+    assert "partial_result = generation_metrics.to_result()" in all_source
+    assert "partial_rollout_diagnostics = rollout_metrics.to_metrics()" in all_source
+    assert "result = generation_metrics.to_result()" in all_source
+    assert "rollout_diagnostics = rollout_metrics.to_metrics()" in all_source
+    assert "evaluate_generation_groups(groups, config=metric_config)" not in all_source
+    assert "rollout_stage_metrics(all_trajectories" not in all_source
+    assert "eval/valid_fraction" in all_source
+    assert "eval/internal_diversity" in all_source
+    assert "eval/mean_max_dice_similarity" in all_source
+    assert "prefix_valid_fraction" in all_source
+    assert "prefix_duplicate_fraction" in all_source
+    assert "prefix_duplicate_valid_fraction" in all_source
+    assert "prefix_average_max_dice_similarity" in all_source
+    assert "prefix_accepted_unique_internal_diversity" in all_source
+    assert "prefix_valid_internal_diversity" in all_source
+    assert "mean_group_valid_fraction" not in all_source
+    assert "mean_group_duplicate_valid_fraction" not in all_source
+    assert "mean_group_internal_diversity" not in all_source
+    assert "mean_trajectory_length" in all_source
+    assert 'prefix = f"eval/{split_name}"' in all_source
+    assert 'f"{prefix}/mean_trajectory_length"' in all_source
+    assert "eval/mean_trajectory_length" in all_source
+    assert "print(progress_metrics)" in all_source
+    assert "print(evaluation_diagnosis)" in all_source
+    assert "wandb.log(progress_metrics, step=evaluated_examples)" in all_source
+    assert "wandb.log(evaluation_diagnosis, step=result.num_groups)" in all_source
+    assert all_source.index("print(progress_metrics)") < all_source.index(
+        "wandb.log(progress_metrics, step=evaluated_examples)"
+    )
+    assert all_source.index("print(evaluation_diagnosis)") < all_source.index(
+        "wandb.log(evaluation_diagnosis, step=result.num_groups)"
+    )
+    assert 'split_name="validation"' in all_source
+    assert 'split_name="processed_test"' in all_source
 
 
 def test_colab_lpm24_ppo_v2_notebook_reports_iteration_diagnostics_and_preview_summary() -> None:

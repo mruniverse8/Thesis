@@ -12,6 +12,7 @@ from evaluation_metrics import (
     evaluate_generated_molecules,
     evaluate_generation_groups,
 )
+from evaluation_metrics.metrics import _parse_molecule_with_fingerprint, internal_diversity
 
 
 def test_accepted_unique_counts_only_valid_molecules_above_dice_threshold() -> None:
@@ -111,6 +112,100 @@ def test_internal_diversity_is_average_pairwise_tanimoto_distance() -> None:
     assert same.internal_diversity == pytest.approx(0.0)
     assert 0.0 <= different.internal_diversity <= 1.0
     assert different.internal_diversity > same.internal_diversity
+
+
+def test_prefix_metrics_use_global_prefix_denominators_and_legacy_aliases() -> None:
+    config = EvaluationMetricConfig(acceptance_dice_threshold=0.0)
+    groups = (
+        GenerationGroup(
+            group_id="group-a",
+            candidates=(
+                MoleculeInput("[C][C][O]", "selfies"),
+                MoleculeInput("[C][C][O]", "selfies"),
+                MoleculeInput("[Bad]", "selfies"),
+            ),
+            targets=(MoleculeInput("[C][C][O]", "selfies"),),
+        ),
+        GenerationGroup(
+            group_id="group-b",
+            candidates=(
+                MoleculeInput("[C][C][O]", "selfies"),
+                MoleculeInput("[O]", "selfies"),
+                MoleculeInput("[Bad]", "selfies"),
+            ),
+            targets=(
+                MoleculeInput("[C][C][O]", "selfies"),
+                MoleculeInput("[O]", "selfies"),
+            ),
+        ),
+    )
+
+    result = evaluate_generation_groups(groups, config=config)
+    assert result.num_candidates == 6
+    assert result.num_valid_candidates == 4
+    assert result.candidate_assessments[1].is_duplicate_valid is True
+    assert result.candidate_assessments[3].is_duplicate_valid is True
+
+    valid_prefix_candidates = (
+        MoleculeInput("[C][C][O]", "selfies"),
+        MoleculeInput("[C][C][O]", "selfies"),
+        MoleculeInput("[C][C][O]", "selfies"),
+        MoleculeInput("[O]", "selfies"),
+    )
+    valid_prefix_fingerprints = []
+    for candidate in valid_prefix_candidates:
+        record, fingerprint = _parse_molecule_with_fingerprint(candidate, config=config)
+        assert record.is_valid is True
+        assert fingerprint is not None
+        valid_prefix_fingerprints.append(fingerprint)
+
+    accepted_unique_candidates = (
+        MoleculeInput("[C][C][O]", "selfies"),
+        MoleculeInput("[O]", "selfies"),
+    )
+    accepted_unique_fingerprints = []
+    for candidate in accepted_unique_candidates:
+        record, fingerprint = _parse_molecule_with_fingerprint(candidate, config=config)
+        assert record.is_valid is True
+        assert fingerprint is not None
+        accepted_unique_fingerprints.append(fingerprint)
+
+    assert result.prefix_valid_fraction == pytest.approx(4.0 / 6.0)
+    assert result.prefix_duplicate_fraction == pytest.approx(2.0 / 6.0)
+    assert result.prefix_duplicate_valid_fraction == pytest.approx(2.0 / 4.0)
+    assert result.prefix_average_max_dice_similarity == pytest.approx(4.0 / 6.0)
+    assert result.prefix_accepted_unique_internal_diversity == pytest.approx(
+        internal_diversity(accepted_unique_fingerprints)
+    )
+    assert result.prefix_valid_internal_diversity == pytest.approx(
+        internal_diversity(valid_prefix_fingerprints)
+    )
+
+    assert result.valid_fraction == pytest.approx(result.prefix_valid_fraction)
+    assert result.internal_diversity == pytest.approx(result.prefix_accepted_unique_internal_diversity)
+    assert result.mean_max_dice_similarity == pytest.approx(result.prefix_average_max_dice_similarity)
+
+    payload = result.to_dict()
+    assert payload["prefix_valid_fraction"] == pytest.approx(4.0 / 6.0)
+    assert payload["prefix_duplicate_fraction"] == pytest.approx(2.0 / 6.0)
+    assert payload["prefix_duplicate_valid_fraction"] == pytest.approx(2.0 / 4.0)
+    assert payload["prefix_average_max_dice_similarity"] == pytest.approx(4.0 / 6.0)
+    assert payload["prefix_accepted_unique_internal_diversity"] == pytest.approx(
+        result.internal_diversity
+    )
+    assert payload["prefix_valid_internal_diversity"] == pytest.approx(
+        result.prefix_valid_internal_diversity
+    )
+    assert payload["valid_fraction"] == pytest.approx(payload["prefix_valid_fraction"])
+    assert payload["internal_diversity"] == pytest.approx(
+        payload["prefix_accepted_unique_internal_diversity"]
+    )
+    assert payload["mean_max_dice_similarity"] == pytest.approx(
+        payload["prefix_average_max_dice_similarity"]
+    )
+    assert "mean_group_valid_fraction" not in payload
+    assert "mean_group_duplicate_valid_fraction" not in payload
+    assert "mean_group_internal_diversity" not in payload
 
 
 def test_result_to_dict_can_include_assessments() -> None:

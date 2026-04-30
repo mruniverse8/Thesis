@@ -257,6 +257,43 @@ class _StageAccumulator:
         ):
             self.invalid_reward_floor_count += 1
 
+    def to_state_dict(self) -> dict[str, object]:
+        return {
+            "num_trajectories": int(self.num_trajectories),
+            "num_valid": int(self.num_valid),
+            "stage_reward_sum": float(self.stage_reward_sum),
+            "num_actions_sum": float(self.num_actions_sum),
+            "invalid_reward_floor_count": int(self.invalid_reward_floor_count),
+            "termination_counts": {
+                str(reason): int(count)
+                for reason, count in sorted(self.termination_counts.items())
+            },
+        }
+
+    @classmethod
+    def from_state_dict(cls, payload: dict[str, object]) -> "_StageAccumulator":
+        accumulator = cls()
+        accumulator.num_trajectories = int(payload.get("num_trajectories", 0))
+        accumulator.num_valid = int(payload.get("num_valid", 0))
+        accumulator.stage_reward_sum = float(payload.get("stage_reward_sum", 0.0))
+        accumulator.num_actions_sum = float(payload.get("num_actions_sum", 0.0))
+        accumulator.invalid_reward_floor_count = int(payload.get("invalid_reward_floor_count", 0))
+        termination_payload = payload.get("termination_counts", {})
+        if isinstance(termination_payload, dict):
+            for reason, count in termination_payload.items():
+                accumulator.termination_counts[str(reason)] = int(count)
+        return accumulator
+
+    def merge(self, other: "_StageAccumulator") -> "_StageAccumulator":
+        self.num_trajectories += int(other.num_trajectories)
+        self.num_valid += int(other.num_valid)
+        self.stage_reward_sum += float(other.stage_reward_sum)
+        self.num_actions_sum += float(other.num_actions_sum)
+        self.invalid_reward_floor_count += int(other.invalid_reward_floor_count)
+        for reason, count in other.termination_counts.items():
+            self.termination_counts[str(reason)] += int(count)
+        return self
+
     def metrics(self, *, stage_index: int, invalid_terminal_reward: float | None) -> dict[str, float]:
         stage_prefix = f"stage{stage_index}_"
         metrics: dict[str, float] = {
@@ -424,3 +461,125 @@ class IncrementalRolloutMetrics:
                 )
             )
         return metrics
+
+    def to_state_dict(self) -> dict[str, object]:
+        return {
+            "max_molecules_per_sequence": self.max_molecules_per_sequence,
+            "invalid_terminal_reward": self.invalid_terminal_reward,
+            "stage_indices": [int(stage_index) for stage_index in self.stage_indices],
+            "num_rollouts": int(self.num_rollouts),
+            "total_trajectories": int(self.total_trajectories),
+            "planned_trajectory_length_sum": int(self.planned_trajectory_length_sum),
+            "max_planned_trajectory_length": int(self.max_planned_trajectory_length),
+            "trajectory_length_sum": int(self.trajectory_length_sum),
+            "max_trajectory_length": int(self.max_trajectory_length),
+            "planned_trajectory_length_2_plus_count": int(self.planned_trajectory_length_2_plus_count),
+            "trajectory_length_2_plus_count": int(self.trajectory_length_2_plus_count),
+            "trajectory_length_3_plus_count": int(self.trajectory_length_3_plus_count),
+            "reached_planned_trajectory_length_count": int(self.reached_planned_trajectory_length_count),
+            "trajectory_length_1_count": int(self.trajectory_length_1_count),
+            "trajectory_length_2_count": int(self.trajectory_length_2_count),
+            "trajectory_length_3_plus_rollout_count": int(self.trajectory_length_3_plus_rollout_count),
+            "invalid_reward_floor_count": int(self.invalid_reward_floor_count),
+            "stage_accumulators": {
+                str(stage_index): accumulator.to_state_dict()
+                for stage_index, accumulator in sorted(self._stage_accumulators.items())
+            },
+        }
+
+    @classmethod
+    def from_state_dict(cls, payload: dict[str, object]) -> "IncrementalRolloutMetrics":
+        stage_indices_payload = payload.get("stage_indices", (1, 2))
+        stage_indices = tuple(int(stage_index) for stage_index in stage_indices_payload)  # type: ignore[arg-type]
+        metrics = cls(
+            max_molecules_per_sequence=(
+                None
+                if payload.get("max_molecules_per_sequence") is None
+                else int(payload["max_molecules_per_sequence"])  # type: ignore[index]
+            ),
+            invalid_terminal_reward=(
+                None
+                if payload.get("invalid_terminal_reward") is None
+                else float(payload["invalid_terminal_reward"])  # type: ignore[index]
+            ),
+            stage_indices=stage_indices or (1, 2),
+        )
+        metrics.num_rollouts = int(payload.get("num_rollouts", 0))
+        metrics.total_trajectories = int(payload.get("total_trajectories", 0))
+        metrics.planned_trajectory_length_sum = int(payload.get("planned_trajectory_length_sum", 0))
+        metrics.max_planned_trajectory_length = int(payload.get("max_planned_trajectory_length", 0))
+        metrics.trajectory_length_sum = int(payload.get("trajectory_length_sum", 0))
+        metrics.max_trajectory_length = int(payload.get("max_trajectory_length", 0))
+        metrics.planned_trajectory_length_2_plus_count = int(
+            payload.get("planned_trajectory_length_2_plus_count", 0)
+        )
+        metrics.trajectory_length_2_plus_count = int(payload.get("trajectory_length_2_plus_count", 0))
+        metrics.trajectory_length_3_plus_count = int(payload.get("trajectory_length_3_plus_count", 0))
+        metrics.reached_planned_trajectory_length_count = int(
+            payload.get("reached_planned_trajectory_length_count", 0)
+        )
+        metrics.trajectory_length_1_count = int(payload.get("trajectory_length_1_count", 0))
+        metrics.trajectory_length_2_count = int(payload.get("trajectory_length_2_count", 0))
+        metrics.trajectory_length_3_plus_rollout_count = int(
+            payload.get("trajectory_length_3_plus_rollout_count", 0)
+        )
+        metrics.invalid_reward_floor_count = int(payload.get("invalid_reward_floor_count", 0))
+        stage_accumulators_payload = payload.get("stage_accumulators", {})
+        if isinstance(stage_accumulators_payload, dict):
+            metrics._stage_accumulators = {
+                int(stage_index): _StageAccumulator.from_state_dict(stage_payload)
+                for stage_index, stage_payload in stage_accumulators_payload.items()
+                if isinstance(stage_payload, dict)
+            }
+        return metrics
+
+    def merge(self, other: "IncrementalRolloutMetrics") -> "IncrementalRolloutMetrics":
+        if (
+            self.max_molecules_per_sequence is not None
+            and other.max_molecules_per_sequence is not None
+            and int(self.max_molecules_per_sequence) != int(other.max_molecules_per_sequence)
+        ):
+            raise ValueError("Cannot merge rollout metrics with different max_molecules_per_sequence values.")
+        if (
+            self.invalid_terminal_reward is not None
+            and other.invalid_terminal_reward is not None
+            and abs(float(self.invalid_terminal_reward) - float(other.invalid_terminal_reward)) > 1.0e-12
+        ):
+            raise ValueError("Cannot merge rollout metrics with different invalid_terminal_reward values.")
+
+        if self.max_molecules_per_sequence is None:
+            self.max_molecules_per_sequence = other.max_molecules_per_sequence
+        if self.invalid_terminal_reward is None:
+            self.invalid_terminal_reward = other.invalid_terminal_reward
+
+        self.stage_indices = tuple(
+            sorted({int(stage_index) for stage_index in self.stage_indices + other.stage_indices})
+        )
+        self.num_rollouts += int(other.num_rollouts)
+        self.total_trajectories += int(other.total_trajectories)
+        self.planned_trajectory_length_sum += int(other.planned_trajectory_length_sum)
+        self.max_planned_trajectory_length = max(
+            int(self.max_planned_trajectory_length),
+            int(other.max_planned_trajectory_length),
+        )
+        self.trajectory_length_sum += int(other.trajectory_length_sum)
+        self.max_trajectory_length = max(
+            int(self.max_trajectory_length),
+            int(other.max_trajectory_length),
+        )
+        self.planned_trajectory_length_2_plus_count += int(other.planned_trajectory_length_2_plus_count)
+        self.trajectory_length_2_plus_count += int(other.trajectory_length_2_plus_count)
+        self.trajectory_length_3_plus_count += int(other.trajectory_length_3_plus_count)
+        self.reached_planned_trajectory_length_count += int(other.reached_planned_trajectory_length_count)
+        self.trajectory_length_1_count += int(other.trajectory_length_1_count)
+        self.trajectory_length_2_count += int(other.trajectory_length_2_count)
+        self.trajectory_length_3_plus_rollout_count += int(other.trajectory_length_3_plus_rollout_count)
+        self.invalid_reward_floor_count += int(other.invalid_reward_floor_count)
+
+        for stage_index, other_accumulator in other._stage_accumulators.items():
+            stage_state = self._stage_accumulators.setdefault(
+                int(stage_index),
+                _StageAccumulator(),
+            )
+            stage_state.merge(other_accumulator)
+        return self
