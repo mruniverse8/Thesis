@@ -31,6 +31,37 @@ def _normalize_metric_key_component(value: str) -> str:
     return value.strip().lower().replace("-", "_").replace(" ", "_")
 
 
+def _extend_pairwise_similarity_state(
+    fingerprint: object,
+    *,
+    fingerprints: list[object],
+    pairwise_similarity_chunks: list[float],
+) -> int:
+    if fingerprints:
+        similarities = DataStructs.BulkTanimotoSimilarity(fingerprint, list(fingerprints))
+        for index, similarity in enumerate(similarities):
+            pairwise_similarity_chunks[index] += float(similarity)
+        pair_count_increment = len(similarities)
+    else:
+        pair_count_increment = 0
+    fingerprints.append(fingerprint)
+    pairwise_similarity_chunks.append(0.0)
+    return pair_count_increment
+
+
+def _internal_diversity_from_pairwise_state(
+    *,
+    pairwise_similarity_chunks: Sequence[float],
+    pair_count: int,
+) -> float:
+    if pair_count == 0:
+        return 0.0
+    pairwise_similarity_sum = 0.0
+    for chunk_sum in pairwise_similarity_chunks:
+        pairwise_similarity_sum += chunk_sum
+    return 1.0 - (pairwise_similarity_sum / pair_count)
+
+
 @dataclass(slots=True)
 class IncrementalGenerationMetrics:
     """Accumulate exact grouped generation metrics without rescanning prefixes."""
@@ -39,9 +70,13 @@ class IncrementalGenerationMetrics:
     num_groups: int = 0
     num_candidates: int = 0
     num_valid_candidates: int = 0
+    num_duplicate_valid_candidates: int = 0
     num_accepted: int = 0
     _max_dice_sum: float = 0.0
     _valid_seen_smiles: set[str] = field(default_factory=set)
+    _valid_fingerprints: list[object] = field(default_factory=list)
+    _valid_pairwise_similarity_chunks: list[float] = field(default_factory=list)
+    _valid_pair_count: int = 0
     _target_seen_smiles: set[str] = field(default_factory=set)
     _novel_accepted_smiles: set[str] = field(default_factory=set)
     _accepted_by_smiles: dict[str, PreparedMolecule] = field(default_factory=dict)
@@ -71,19 +106,21 @@ class IncrementalGenerationMetrics:
     def _add_accepted_unique(self, canonical_smiles: str, prepared: PreparedMolecule) -> None:
         if canonical_smiles in self._accepted_by_smiles:
             return
-        if self._accepted_fingerprints:
-            similarities = DataStructs.BulkTanimotoSimilarity(
-                prepared.fingerprint,
-                list(self._accepted_fingerprints),
-            )
-            for index, similarity in enumerate(similarities):
-                self._accepted_pairwise_similarity_chunks[index] += float(similarity)
-            self._accepted_pair_count += len(similarities)
+        self._accepted_pair_count += _extend_pairwise_similarity_state(
+            prepared.fingerprint,
+            fingerprints=self._accepted_fingerprints,
+            pairwise_similarity_chunks=self._accepted_pairwise_similarity_chunks,
+        )
         self._accepted_by_smiles[canonical_smiles] = prepared
-        self._accepted_fingerprints.append(prepared.fingerprint)
-        self._accepted_pairwise_similarity_chunks.append(0.0)
         if canonical_smiles not in self._target_seen_smiles:
             self._novel_accepted_smiles.add(canonical_smiles)
+
+    def _add_valid_candidate(self, fingerprint: object) -> None:
+        self._valid_pair_count += _extend_pairwise_similarity_state(
+            fingerprint,
+            fingerprints=self._valid_fingerprints,
+            pairwise_similarity_chunks=self._valid_pairwise_similarity_chunks,
+        )
 
     def update(self, group: GenerationGroup) -> None:
         self.num_groups += 1
@@ -108,7 +145,9 @@ class IncrementalGenerationMetrics:
             assert canonical_smiles is not None
             assert candidate_fp is not None
             self.num_valid_candidates += 1
+            self.num_duplicate_valid_candidates += int(canonical_smiles in self._valid_seen_smiles)
             self._valid_seen_smiles.add(canonical_smiles)
+            self._add_valid_candidate(candidate_fp)
 
             if not prepared_targets:
                 continue
@@ -119,14 +158,12 @@ class IncrementalGenerationMetrics:
                 continue
 
             self.num_accepted += 1
-            self._add_accepted_unique(
-                canonical_smiles,
-                PreparedMolecule(
-                    molecule_input=candidate,
-                    record=candidate_record,
-                    fingerprint=candidate_fp,
-                ),
+            prepared_candidate = PreparedMolecule(
+                molecule_input=candidate,
+                record=candidate_record,
+                fingerprint=candidate_fp,
             )
+            self._add_accepted_unique(canonical_smiles, prepared_candidate)
 
     @property
     def accepted_unique_count(self) -> int:
@@ -134,12 +171,17 @@ class IncrementalGenerationMetrics:
 
     @property
     def internal_diversity(self) -> float:
-        if self._accepted_pair_count == 0:
-            return 0.0
-        pairwise_similarity_sum = 0.0
-        for chunk_sum in self._accepted_pairwise_similarity_chunks:
-            pairwise_similarity_sum += chunk_sum
-        return 1.0 - (pairwise_similarity_sum / self._accepted_pair_count)
+        return _internal_diversity_from_pairwise_state(
+            pairwise_similarity_chunks=self._accepted_pairwise_similarity_chunks,
+            pair_count=self._accepted_pair_count,
+        )
+
+    @property
+    def valid_internal_diversity(self) -> float:
+        return _internal_diversity_from_pairwise_state(
+            pairwise_similarity_chunks=self._valid_pairwise_similarity_chunks,
+            pair_count=self._valid_pair_count,
+        )
 
     def to_result(self) -> EvaluationMetricsResult:
         if self.config.compute_n_circles:
@@ -152,6 +194,17 @@ class IncrementalGenerationMetrics:
             n_circles_value, n_circles_exact_value = 0, False
         novelty_count = len(self._novel_accepted_smiles)
         novelty_fraction = novelty_count / max(self.accepted_unique_count, 1)
+        # Prefix-average metric: cumulative over all generated samples seen so far.
+        prefix_valid_fraction = self.num_valid_candidates / max(self.num_candidates, 1)
+        prefix_duplicate_fraction = self.num_duplicate_valid_candidates / max(
+            self.num_candidates,
+            1,
+        )
+        prefix_duplicate_valid_fraction = self.num_duplicate_valid_candidates / max(
+            self.num_valid_candidates,
+            1,
+        )
+        prefix_average_max_dice_similarity = self._max_dice_sum / max(self.num_candidates, 1)
         return EvaluationMetricsResult(
             config=self.config,
             num_groups=self.num_groups,
@@ -162,10 +215,15 @@ class IncrementalGenerationMetrics:
             accepted_unique_count=self.accepted_unique_count,
             n_circles=n_circles_value,
             n_circles_exact=n_circles_exact_value,
+            valid_fraction=prefix_valid_fraction,
             internal_diversity=self.internal_diversity,
-            mean_max_dice_similarity=(
-                self._max_dice_sum / self.num_candidates if self.num_candidates > 0 else 0.0
-            ),
+            mean_max_dice_similarity=prefix_average_max_dice_similarity,
+            prefix_valid_fraction=prefix_valid_fraction,
+            prefix_duplicate_fraction=prefix_duplicate_fraction,
+            prefix_duplicate_valid_fraction=prefix_duplicate_valid_fraction,
+            prefix_average_max_dice_similarity=prefix_average_max_dice_similarity,
+            prefix_accepted_unique_internal_diversity=self.internal_diversity,
+            prefix_valid_internal_diversity=self.valid_internal_diversity,
             accepted_unique_smiles=tuple(sorted(self._accepted_by_smiles)),
             novelty_count=novelty_count,
             novelty_fraction=novelty_fraction,

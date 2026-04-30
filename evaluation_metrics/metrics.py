@@ -110,8 +110,15 @@ class EvaluationMetricsResult:
     accepted_unique_count: int
     n_circles: int
     n_circles_exact: bool
+    valid_fraction: float
     internal_diversity: float
     mean_max_dice_similarity: float
+    prefix_valid_fraction: float
+    prefix_duplicate_fraction: float
+    prefix_duplicate_valid_fraction: float
+    prefix_average_max_dice_similarity: float
+    prefix_accepted_unique_internal_diversity: float
+    prefix_valid_internal_diversity: float
     accepted_unique_smiles: tuple[str, ...] = field(default_factory=tuple)
     novelty_count: int = 0
     novelty_fraction: float = 0.0
@@ -128,8 +135,17 @@ class EvaluationMetricsResult:
             "accepted_unique_count": self.accepted_unique_count,
             "n_circles": self.n_circles,
             "n_circles_exact": self.n_circles_exact,
+            "valid_fraction": self.valid_fraction,
             "internal_diversity": self.internal_diversity,
             "mean_max_dice_similarity": self.mean_max_dice_similarity,
+            "prefix_valid_fraction": self.prefix_valid_fraction,
+            "prefix_duplicate_fraction": self.prefix_duplicate_fraction,
+            "prefix_duplicate_valid_fraction": self.prefix_duplicate_valid_fraction,
+            "prefix_average_max_dice_similarity": self.prefix_average_max_dice_similarity,
+            "prefix_accepted_unique_internal_diversity": (
+                self.prefix_accepted_unique_internal_diversity
+            ),
+            "prefix_valid_internal_diversity": self.prefix_valid_internal_diversity,
             "accepted_unique_smiles": list(self.accepted_unique_smiles),
             "novelty_count": self.novelty_count,
             "novelty_fraction": self.novelty_fraction,
@@ -376,7 +392,9 @@ def evaluate_generation_groups(
     valid_seen_smiles: set[str] = set()
     accepted_by_smiles: dict[str, PreparedMolecule] = {}
     target_seen_smiles: set[str] = set()
-    max_dice_values: list[float] = []
+    valid_candidate_fingerprints: list[object] = []
+    max_dice_sum = 0.0
+    duplicate_valid_candidate_count = 0
 
     for group in groups:
         target_references = _prepare_targets(group.targets, config=metric_config)
@@ -398,7 +416,10 @@ def evaluate_generation_groups(
             )
             is_duplicate_valid = bool(is_valid and canonical_smiles in valid_seen_smiles)
             if is_valid and canonical_smiles is not None:
+                assert candidate_fp is not None
+                duplicate_valid_candidate_count += int(is_duplicate_valid)
                 valid_seen_smiles.add(canonical_smiles)
+                valid_candidate_fingerprints.append(candidate_fp)
 
             if not is_valid:
                 assessments.append(
@@ -414,7 +435,6 @@ def evaluate_generation_groups(
                         rejection_reason="invalid_molecule",
                     )
                 )
-                max_dice_values.append(0.0)
                 continue
 
             if not target_references:
@@ -431,7 +451,6 @@ def evaluate_generation_groups(
                         rejection_reason="no_valid_targets",
                     )
                 )
-                max_dice_values.append(0.0)
                 continue
 
             assert canonical_smiles is not None
@@ -440,18 +459,16 @@ def evaluate_generation_groups(
                 candidate_fp,
                 target_references,
             )
-            max_dice_values.append(max_dice)
+            max_dice_sum += max_dice
             is_accepted = max_dice > metric_config.acceptance_dice_threshold
             rejection_reason = None if is_accepted else "below_dice_threshold"
             if is_accepted:
-                accepted_by_smiles.setdefault(
-                    canonical_smiles,
-                    PreparedMolecule(
-                        molecule_input=candidate,
-                        record=candidate_record,
-                        fingerprint=candidate_fp,
-                    ),
+                prepared_candidate = PreparedMolecule(
+                    molecule_input=candidate,
+                    record=candidate_record,
+                    fingerprint=candidate_fp,
                 )
+                accepted_by_smiles.setdefault(canonical_smiles, prepared_candidate)
 
             assessments.append(
                 _candidate_assessment(
@@ -479,12 +496,17 @@ def evaluate_generation_groups(
         else (0, False)
     )
     num_candidates = len(assessments)
+    num_valid_candidates = sum(int(assessment.is_valid) for assessment in assessments)
     num_accepted = sum(int(assessment.is_accepted) for assessment in assessments)
-    mean_max_dice = (
-        sum(max_dice_values) / len(max_dice_values)
-        if max_dice_values
-        else 0.0
+    # Prefix-average metric: cumulative over all generated samples seen so far.
+    prefix_valid_fraction = num_valid_candidates / max(num_candidates, 1)
+    prefix_duplicate_fraction = duplicate_valid_candidate_count / max(num_candidates, 1)
+    prefix_duplicate_valid_fraction = (
+        duplicate_valid_candidate_count / max(num_valid_candidates, 1)
     )
+    prefix_average_max_dice_similarity = max_dice_sum / max(num_candidates, 1)
+    prefix_accepted_unique_internal_diversity = internal_diversity(accepted_fingerprints)
+    prefix_valid_internal_diversity = internal_diversity(valid_candidate_fingerprints)
     novel_accepted_unique_smiles = tuple(
         smiles
         for smiles in sorted(accepted_by_smiles)
@@ -496,14 +518,21 @@ def evaluate_generation_groups(
         config=metric_config,
         num_groups=len(groups),
         num_candidates=num_candidates,
-        num_valid_candidates=sum(int(assessment.is_valid) for assessment in assessments),
+        num_valid_candidates=num_valid_candidates,
         num_unique_valid_molecules=len(valid_seen_smiles),
         num_accepted=num_accepted,
         accepted_unique_count=len(accepted_unique),
         n_circles=n_circles_value,
         n_circles_exact=n_circles_exact_value,
-        internal_diversity=internal_diversity(accepted_fingerprints),
-        mean_max_dice_similarity=mean_max_dice,
+        valid_fraction=prefix_valid_fraction,
+        internal_diversity=prefix_accepted_unique_internal_diversity,
+        mean_max_dice_similarity=prefix_average_max_dice_similarity,
+        prefix_valid_fraction=prefix_valid_fraction,
+        prefix_duplicate_fraction=prefix_duplicate_fraction,
+        prefix_duplicate_valid_fraction=prefix_duplicate_valid_fraction,
+        prefix_average_max_dice_similarity=prefix_average_max_dice_similarity,
+        prefix_accepted_unique_internal_diversity=prefix_accepted_unique_internal_diversity,
+        prefix_valid_internal_diversity=prefix_valid_internal_diversity,
         accepted_unique_smiles=tuple(sorted(accepted_by_smiles)),
         novelty_count=novelty_count,
         novelty_fraction=novelty_fraction,
