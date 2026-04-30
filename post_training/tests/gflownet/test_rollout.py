@@ -14,8 +14,10 @@ from post_training.gflownet.rollout import (
     build_sampled_stage_trajectory_from_generation,
     build_target_teacher_stage_trajectory_for_example,
     encode_prompt_cached,
+    sample_stage_batch,
     sample_stage,
     sample_stage_trajectories_for_example,
+    sample_stage_trajectories_for_examples,
     sample_target_prefix_stage_trajectory_for_example,
 )
 from post_training.shared.decoding import StageTokenConstraints
@@ -23,6 +25,21 @@ from post_training.shared.sequence import build_stage_prefix
 
 
 class DummyTokenizer:
+    def _encode_single(self, text: str) -> list[int]:
+        remaining = str(text)
+        token_ids: list[int] = []
+        known_tokens = sorted(self.token_to_id, key=len, reverse=True)
+        while remaining:
+            matched_token = next(
+                (token for token in known_tokens if remaining.startswith(token)),
+                None,
+            )
+            if matched_token is None:
+                return [1, 2]
+            token_ids.append(int(self.token_to_id[matched_token]))
+            remaining = remaining[len(matched_token) :]
+        return token_ids
+
     def __init__(self, id_to_token: dict[int, str], token_to_id: dict[str, int]) -> None:
         self.id_to_token = id_to_token
         self.token_to_id = token_to_id
@@ -38,19 +55,24 @@ class DummyTokenizer:
         return_attention_mask=False,
     ):
         del truncation, max_length, add_special_tokens, return_attention_mask
-        remaining = str(text)
-        token_ids: list[int] = []
-        known_tokens = sorted(self.token_to_id, key=len, reverse=True)
-        while remaining:
-            matched_token = next(
-                (token for token in known_tokens if remaining.startswith(token)),
-                None,
-            )
-            if matched_token is None:
-                token_ids = [1, 2]
-                break
-            token_ids.append(int(self.token_to_id[matched_token]))
-            remaining = remaining[len(matched_token) :]
+        if isinstance(text, (list, tuple)):
+            rows = [self._encode_single(item) for item in text]
+            if return_tensors == "pt":
+                max_row_length = max(len(row) for row in rows)
+                input_ids = torch.zeros((len(rows), max_row_length), dtype=torch.long)
+                attention_mask = torch.zeros_like(input_ids)
+                for row_index, row in enumerate(rows):
+                    input_ids[row_index, : len(row)] = torch.tensor(row, dtype=torch.long)
+                    attention_mask[row_index, : len(row)] = 1
+                return {
+                    "input_ids": input_ids,
+                    "attention_mask": attention_mask,
+                }
+            return {
+                "input_ids": rows,
+                "attention_mask": [[1] * len(row) for row in rows],
+            }
+        token_ids = self._encode_single(text)
         if return_tensors == "pt":
             return {
                 "input_ids": torch.tensor([token_ids], dtype=torch.long),
@@ -153,6 +175,68 @@ class PrefixLogitModel:
     ) -> None:
         self.policy_model = PrefixLogitPolicyModel(
             logits_by_action_prefix,
+            vocab_size=vocab_size,
+            eos_token_id=eos_token_id,
+        )
+
+
+class BatchPrefixLogitPolicyModel:
+    def __init__(
+        self,
+        logits_by_row_and_prefix: dict[tuple[int, tuple[int, ...]], dict[int, float]],
+        *,
+        vocab_size: int = 16,
+        eos_token_id: int | None = 99,
+    ) -> None:
+        self.logits_by_row_and_prefix = logits_by_row_and_prefix
+        self.config = SimpleNamespace(decoder_start_token_id=0, eos_token_id=eos_token_id)
+        self.vocab_size = vocab_size
+
+    def __call__(
+        self,
+        *,
+        input_ids: torch.Tensor | None = None,
+        attention_mask: torch.Tensor | None = None,
+        encoder_outputs=None,
+        decoder_input_ids: torch.Tensor,
+        decoder_attention_mask: torch.Tensor | None = None,
+        return_dict: bool,
+        **kwargs,
+    ) -> SimpleNamespace:
+        del attention_mask, return_dict, kwargs
+        if decoder_attention_mask is None:
+            decoder_attention_mask = torch.ones_like(decoder_input_ids)
+        logits = torch.full(
+            (decoder_input_ids.size(0), decoder_input_ids.size(1), self.vocab_size),
+            -20.0,
+        )
+        for row_index in range(decoder_input_ids.size(0)):
+            if input_ids is not None:
+                row_key = int(input_ids[row_index, 0].item())
+            elif encoder_outputs is not None:
+                row_key = int(encoder_outputs[0][row_index, 0, 0].item())
+            else:
+                row_key = row_index
+            active_length = int(decoder_attention_mask[row_index].sum().item())
+            action_prefix = tuple(
+                int(token_id)
+                for token_id in decoder_input_ids[row_index, 1:active_length].tolist()
+            )
+            for token_id, score in self.logits_by_row_and_prefix.get((row_key, action_prefix), {}).items():
+                logits[row_index, -1, int(token_id)] = float(score)
+        return SimpleNamespace(logits=logits)
+
+
+class BatchPrefixLogitModel:
+    def __init__(
+        self,
+        logits_by_row_and_prefix: dict[tuple[int, tuple[int, ...]], dict[int, float]],
+        *,
+        vocab_size: int = 16,
+        eos_token_id: int | None = 99,
+    ) -> None:
+        self.policy_model = BatchPrefixLogitPolicyModel(
+            logits_by_row_and_prefix,
             vocab_size=vocab_size,
             eos_token_id=eos_token_id,
         )
@@ -1368,6 +1452,203 @@ def test_sample_stage_trajectories_for_example_uses_max_molecules_for_planned_st
     )
 
     assert [trajectory.stage_index for trajectory in trajectories] == [1, 2, 3]
+
+
+def test_sample_stage_batch_generates_multiple_rows_with_padding() -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: "[C][N]",
+            5: "[O]",
+        },
+        {
+            "<bom>": 1,
+            "[C][C][O]": 2,
+            EOM_TOKEN: 3,
+            "[C][N]": 4,
+            "[O]": 5,
+        },
+    )
+    model = BatchPrefixLogitModel(
+        {
+            (11, ()): {1: 20.0},
+            (11, (1,)): {2: 20.0},
+            (11, (1, 2)): {3: 20.0},
+            (22, ()): {1: 20.0},
+            (22, (1,)): {4: 20.0},
+            (22, (1, 4)): {5: 20.0},
+            (22, (1, 4, 5)): {3: 20.0},
+        },
+        vocab_size=16,
+    )
+
+    stage_samples = sample_stage_batch(
+        model,
+        tokenizer,
+        input_ids=torch.tensor([[11, 0], [22, 0]], dtype=torch.long),
+        attention_mask=torch.tensor([[1, 0], [1, 0]], dtype=torch.long),
+        decoder_prefix_ids=[
+            torch.tensor([[0]], dtype=torch.long),
+            torch.tensor([[0]], dtype=torch.long),
+        ],
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="sample",
+            temperature=1.0e-6,
+            top_p=1.0,
+            max_stage_new_tokens=4,
+        ),
+    )
+
+    assert [sample["sampled_selfies"] for sample in stage_samples] == [
+        "[C][C][O]",
+        "[C][N][O]",
+    ]
+    assert [sample["termination_reason"] for sample in stage_samples] == [
+        "stop_token",
+        "stop_token",
+    ]
+    assert [tuple(sample["action_token_ids"]) for sample in stage_samples] == [
+        (1, 2),
+        (1, 4, 5),
+    ]
+
+
+def test_sample_stage_trajectories_for_examples_batches_sample_rollouts(monkeypatch) -> None:
+    tokenizer = DummyTokenizer(
+        {
+            1: "<bom>",
+            2: "[C][C][O]",
+            3: "<eom>",
+            4: "[C][C][N]",
+            5: "[C][N][O]",
+        },
+        {
+            "<bom>": 1,
+            "[C][C][O]": 2,
+            EOM_TOKEN: 3,
+            "[C][C][N]": 4,
+            "[C][N][O]": 5,
+        },
+    )
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    samples = iter(
+        [
+            [
+                {
+                    "stage_text": "<bom>[C][C][O]<eom>",
+                    "sampled_selfies": "[C][C][O]",
+                    "action_token_ids": (1, 2),
+                    "stop_token": EOM_TOKEN,
+                    "termination_reason": "stop_token",
+                },
+                {
+                    "stage_text": "<bom>[C][N][O]",
+                    "sampled_selfies": "[C][N][O]",
+                    "action_token_ids": (1, 5),
+                    "stop_token": None,
+                    "termination_reason": "max_stage_new_tokens",
+                },
+            ],
+            [
+                {
+                    "stage_text": "<bom>[C][C][N]<eom>",
+                    "sampled_selfies": "[C][C][N]",
+                    "action_token_ids": (1, 4),
+                    "stop_token": EOM_TOKEN,
+                    "termination_reason": "stop_token",
+                },
+            ],
+        ]
+    )
+    monkeypatch.setattr("post_training.gflownet.rollout.sample_stage_batch", lambda *args, **kwargs: next(samples))
+
+    trajectories_by_example = sample_stage_trajectories_for_examples(
+        DummyModel(),
+        tokenizer,
+        [
+            {
+                "id": "example-1",
+                "prompt": "prompt-1",
+                "description": "description-1",
+                "target_selfies_list": ["[C][C][O]", "[C][C][N]"],
+            },
+            {
+                "id": "example-2",
+                "prompt": "prompt-2",
+                "description": "description-2",
+                "target_selfies_list": ["[C][N][O]"],
+            },
+        ],
+        rollout_ids=["rollout-1", "rollout-2"],
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="sample",
+            max_molecules_per_sequence=3,
+            append_probability=1.0,
+        ),
+        reward_config=CHEBI20_REWARD_CONFIG,
+        invalid_terminal_reward=1.0e-4,
+        device=torch.device("cpu"),
+    )
+
+    assert [[trajectory.stage_index for trajectory in items] for items in trajectories_by_example] == [
+        [1, 2],
+        [1],
+    ]
+    assert [trajectory.sampled_selfies for trajectory in trajectories_by_example[0]] == [
+        "[C][C][O]",
+        "[C][C][N]",
+    ]
+    assert trajectories_by_example[1][0].termination_reason == "max_stage_new_tokens"
+
+
+def test_sample_stage_trajectories_for_examples_falls_back_to_single_example_for_beam(
+    monkeypatch,
+) -> None:
+    tokenizer = DummyTokenizer({3: "<eom>"}, {EOM_TOKEN: 3})
+
+    class DummyModel:
+        def __init__(self) -> None:
+            self.policy_model = type(
+                "Policy",
+                (),
+                {"config": type("Config", (), {"decoder_start_token_id": 0, "eos_token_id": 99})()},
+            )()
+
+    def fake_single(*args, **kwargs):
+        example = args[2]
+        return [str(example["id"])]
+
+    monkeypatch.setattr(
+        "post_training.gflownet.rollout.sample_stage_trajectories_for_example",
+        fake_single,
+    )
+
+    trajectories_by_example = sample_stage_trajectories_for_examples(
+        DummyModel(),
+        tokenizer,
+        [
+            {"id": "example-1", "prompt": "prompt-1", "description": "description-1", "target_selfies_list": []},
+            {"id": "example-2", "prompt": "prompt-2", "description": "description-2", "target_selfies_list": []},
+        ],
+        rollout_ids=["rollout-1", "rollout-2"],
+        generation_config=GFlowNetRolloutConfig(
+            decoding_strategy="beam",
+            num_beams=2,
+        ),
+        device=torch.device("cpu"),
+    )
+
+    assert trajectories_by_example == [["example-1"], ["example-2"]]
 
 
 def test_sample_stage_trajectories_for_example_reuses_encoder_cache(monkeypatch) -> None:

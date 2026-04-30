@@ -44,6 +44,26 @@ def encode_prompt(
     return {key: value.to(device) for key, value in encoded.items()}
 
 
+def encode_prompts(
+    tokenizer: PreTrainedTokenizerBase,
+    prompt_texts: Sequence[str],
+    *,
+    max_source_length: int,
+    device: torch.device,
+) -> dict[str, torch.Tensor]:
+    encoded = tokenizer(
+        list(prompt_texts),
+        padding=True,
+        truncation=True,
+        max_length=max_source_length,
+        return_tensors="pt",
+    )
+    prompt_inputs = {key: value.to(device) for key, value in encoded.items()}
+    if "attention_mask" not in prompt_inputs:
+        prompt_inputs["attention_mask"] = torch.ones_like(prompt_inputs["input_ids"])
+    return prompt_inputs
+
+
 @dataclass(frozen=True)
 class EncoderCache:
     last_hidden_state: torch.Tensor
@@ -64,6 +84,32 @@ def encode_prompt_cached(
     prompt_inputs = encode_prompt(
         tokenizer,
         prompt_text,
+        max_source_length=max_source_length,
+        device=device,
+    )
+    with torch.no_grad():
+        encoder_outputs = model.policy_model.get_encoder()(
+            input_ids=prompt_inputs["input_ids"],
+            attention_mask=prompt_inputs["attention_mask"],
+            return_dict=True,
+        )
+    return EncoderCache(
+        last_hidden_state=encoder_outputs.last_hidden_state,
+        attention_mask=prompt_inputs["attention_mask"],
+    )
+
+
+def encode_prompts_cached(
+    model: GFlowNetModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt_texts: Sequence[str],
+    *,
+    max_source_length: int,
+    device: torch.device,
+) -> EncoderCache:
+    prompt_inputs = encode_prompts(
+        tokenizer,
+        prompt_texts,
         max_source_length=max_source_length,
         device=device,
     )
@@ -127,6 +173,38 @@ def _encode_prompt_for_sampling(
     return prompt_inputs, None
 
 
+def _encode_prompts_for_sampling(
+    model: GFlowNetModel,
+    tokenizer: PreTrainedTokenizerBase,
+    prompt_texts: Sequence[str],
+    *,
+    max_source_length: int,
+    device: torch.device,
+) -> tuple[dict[str, torch.Tensor], EncoderCache | None]:
+    get_encoder = getattr(model.policy_model, "get_encoder", None)
+    if callable(get_encoder):
+        encoder_cache = encode_prompts_cached(
+            model,
+            tokenizer,
+            prompt_texts,
+            max_source_length=max_source_length,
+            device=device,
+        )
+        prompt_inputs = {
+            "input_ids": torch.empty_like(encoder_cache.attention_mask),
+            "attention_mask": encoder_cache.attention_mask,
+        }
+        return prompt_inputs, encoder_cache
+
+    prompt_inputs = encode_prompts(
+        tokenizer,
+        prompt_texts,
+        max_source_length=max_source_length,
+        device=device,
+    )
+    return prompt_inputs, None
+
+
 def encode_decoder_prefix(
     tokenizer: PreTrainedTokenizerBase,
     prefix_text: str,
@@ -145,6 +223,35 @@ def encode_decoder_prefix(
 
     start_tensor = torch.tensor([[decoder_start_token_id]], device=device)
     return torch.cat([start_tensor, prefix_ids], dim=1)
+
+
+def _normalize_decoder_prefix_ids(
+    decoder_prefix_ids: torch.Tensor,
+    *,
+    device: torch.device,
+) -> torch.Tensor:
+    prefix_tensor = decoder_prefix_ids.to(device=device, dtype=torch.long)
+    if prefix_tensor.ndim == 2:
+        if prefix_tensor.size(0) != 1:
+            raise ValueError("decoder_prefix_ids must have shape [1, prefix_length].")
+        prefix_tensor = prefix_tensor.squeeze(0)
+    elif prefix_tensor.ndim != 1:
+        raise ValueError("decoder_prefix_ids must have shape [prefix_length] or [1, prefix_length].")
+    if prefix_tensor.numel() < 1:
+        raise ValueError("decoder_prefix_ids must include a decoder start token.")
+    return prefix_tensor
+
+
+def _slice_encoder_cache(
+    encoder_cache: EncoderCache | None,
+    row_indices: Sequence[int],
+) -> EncoderCache | None:
+    if encoder_cache is None:
+        return None
+    return EncoderCache(
+        last_hidden_state=encoder_cache.last_hidden_state[row_indices],
+        attention_mask=encoder_cache.attention_mask[row_indices],
+    )
 
 
 def _top_p_sample(probabilities: torch.Tensor, top_p: float) -> torch.Tensor:
@@ -827,6 +934,151 @@ def sample_stage(
     )
 
 
+def sample_stage_batch(
+    model: GFlowNetModel,
+    tokenizer: PreTrainedTokenizerBase,
+    *,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    encoder_cache: EncoderCache | None = None,
+    decoder_prefix_ids: Sequence[torch.Tensor],
+    generation_config: GFlowNetRolloutConfig,
+    stage_token_constraints: StageTokenConstraints | None = None,
+) -> list[dict[str, Any]]:
+    batch_size = len(decoder_prefix_ids)
+    if batch_size == 0:
+        return []
+    if input_ids.ndim != 2 or attention_mask.ndim != 2:
+        raise ValueError("input_ids and attention_mask must have shape [batch_size, sequence_length].")
+    if int(input_ids.size(0)) != batch_size or int(attention_mask.size(0)) != batch_size:
+        raise ValueError("decoder_prefix_ids length must match the prompt batch size.")
+
+    decoding_strategy = str(generation_config.decoding_strategy).strip().lower()
+    if decoding_strategy == "beam":
+        outputs: list[dict[str, Any]] = []
+        for row_index, prefix_ids in enumerate(decoder_prefix_ids):
+            outputs.append(
+                beam_search_stage(
+                    model,
+                    tokenizer,
+                    input_ids=input_ids[row_index : row_index + 1],
+                    attention_mask=attention_mask[row_index : row_index + 1],
+                    encoder_cache=_slice_encoder_cache(encoder_cache, [row_index]),
+                    decoder_prefix_ids=_normalize_decoder_prefix_ids(
+                        prefix_ids,
+                        device=attention_mask.device,
+                    ).unsqueeze(0),
+                    generation_config=generation_config,
+                    stage_token_constraints=stage_token_constraints,
+                )
+            )
+        return outputs
+
+    eom_token_id = int(tokenizer.convert_tokens_to_ids(EOM_TOKEN))
+    eos_token_id = model.policy_model.config.eos_token_id
+    resolved_constraints = resolve_stage_token_constraints(model, stage_token_constraints)
+    device = attention_mask.device
+    source_lengths = [int(value) for value in attention_mask.sum(dim=1).tolist()]
+    current_decoder_sequences = [
+        _normalize_decoder_prefix_ids(prefix_ids, device=device).clone()
+        for prefix_ids in decoder_prefix_ids
+    ]
+    decoder_prefix_lengths = [int(sequence.numel()) for sequence in current_decoder_sequences]
+    raw_action_token_ids: list[list[int]] = [[] for _ in range(batch_size)]
+    stop_tokens: list[str | None] = [None] * batch_size
+    termination_reasons: list[str] = ["max_stage_new_tokens"] * batch_size
+    finished = [False] * batch_size
+    decoder_pad_token_id = int(getattr(model.policy_model.config, "decoder_start_token_id", 0))
+
+    with torch.no_grad():
+        for _ in range(generation_config.max_stage_new_tokens):
+            active_rows: list[int] = []
+            for row_index in range(batch_size):
+                if finished[row_index]:
+                    continue
+                total_length = (
+                    source_lengths[row_index]
+                    + decoder_prefix_lengths[row_index]
+                    + len(raw_action_token_ids[row_index])
+                )
+                if total_length >= generation_config.max_sequence_length:
+                    termination_reasons[row_index] = "max_sequence_length"
+                    finished[row_index] = True
+                    continue
+                active_rows.append(row_index)
+
+            if not active_rows:
+                break
+
+            max_decoder_length = max(
+                int(current_decoder_sequences[row_index].numel()) for row_index in active_rows
+            )
+            decoder_input_ids = torch.full(
+                (len(active_rows), max_decoder_length),
+                decoder_pad_token_id,
+                dtype=torch.long,
+                device=device,
+            )
+            decoder_attention_mask = torch.zeros_like(decoder_input_ids)
+            for batch_row, row_index in enumerate(active_rows):
+                sequence = current_decoder_sequences[row_index]
+                decoder_input_ids[batch_row, : sequence.numel()] = sequence
+                decoder_attention_mask[batch_row, : sequence.numel()] = 1
+
+            active_input_ids = input_ids[active_rows]
+            active_attention_mask = attention_mask[active_rows]
+            active_encoder_cache = _slice_encoder_cache(encoder_cache, active_rows)
+            outputs = model.policy_model(
+                **_policy_model_prompt_kwargs(
+                    active_input_ids,
+                    active_attention_mask,
+                    active_encoder_cache,
+                ),
+                decoder_input_ids=decoder_input_ids,
+                decoder_attention_mask=decoder_attention_mask,
+                return_dict=True,
+            )
+            next_logits = outputs.logits[:, -1, :]
+
+            for batch_row, row_index in enumerate(active_rows):
+                next_token, _, _ = sample_next_token(
+                    next_logits[batch_row : batch_row + 1, :],
+                    temperature=generation_config.temperature,
+                    top_p=generation_config.top_p,
+                    action_token_ids=tuple(raw_action_token_ids[row_index]),
+                    stage_token_constraints=resolved_constraints,
+                )
+                next_token_id = int(next_token.item())
+                if next_token_id == eom_token_id:
+                    stop_tokens[row_index] = EOM_TOKEN
+                    termination_reasons[row_index] = "stop_token"
+                    finished[row_index] = True
+                    continue
+                if eos_token_id is not None and next_token_id == int(eos_token_id):
+                    stop_tokens[row_index] = tokenizer.eos_token
+                    termination_reasons[row_index] = "eos_token"
+                    finished[row_index] = True
+                    continue
+
+                raw_action_token_ids[row_index].append(next_token_id)
+                current_decoder_sequences[row_index] = torch.cat(
+                    [
+                        current_decoder_sequences[row_index],
+                        next_token.reshape(-1).to(device=device, dtype=torch.long),
+                    ]
+                )
+
+    return [
+        _build_stage_sample_from_generation(
+            tokenizer,
+            raw_action_token_ids=raw_action_token_ids[row_index],
+            stop_token=stop_tokens[row_index],
+            termination_reason=termination_reasons[row_index],
+        )
+        for row_index in range(batch_size)
+    ]
+
+
 def sample_stage_trajectories_for_example(
     model: GFlowNetModel,
     tokenizer: PreTrainedTokenizerBase,
@@ -926,3 +1178,152 @@ def sample_stage_trajectories_for_example(
     if return_last_valid_trajectory_only:
         return [last_valid_trajectory] if last_valid_trajectory is not None else []
     return trajectories
+
+
+def sample_stage_trajectories_for_examples(
+    model: GFlowNetModel,
+    tokenizer: PreTrainedTokenizerBase,
+    examples: Sequence[dict[str, Any]],
+    *,
+    rollout_ids: Sequence[str],
+    generation_config: GFlowNetRolloutConfig,
+    reward_config: RewardConfig | None = None,
+    invalid_terminal_reward: float = 1.0e-4,
+    device: torch.device,
+    stage_token_constraints: StageTokenConstraints | None = None,
+    rng: random.Random | None = None,
+    return_last_valid_trajectory_only: bool = False,
+) -> list[list[SampledStageTrajectory]]:
+    if len(examples) != len(rollout_ids):
+        raise ValueError("examples and rollout_ids must have the same length.")
+    if not examples:
+        return []
+    if str(generation_config.decoding_strategy).strip().lower() == "beam":
+        return [
+            sample_stage_trajectories_for_example(
+                model,
+                tokenizer,
+                example,
+                rollout_id=rollout_id,
+                generation_config=generation_config,
+                reward_config=reward_config,
+                invalid_terminal_reward=invalid_terminal_reward,
+                device=device,
+                stage_token_constraints=stage_token_constraints,
+                rng=rng,
+                return_last_valid_trajectory_only=return_last_valid_trajectory_only,
+            )
+            for example, rollout_id in zip(examples, rollout_ids)
+        ]
+
+    prompt_inputs, encoder_cache = _encode_prompts_for_sampling(
+        model,
+        tokenizer,
+        [str(example["prompt"]) for example in examples],
+        max_source_length=generation_config.max_source_length,
+        device=device,
+    )
+    decoder_start_token_id = int(model.policy_model.config.decoder_start_token_id)
+    planned_stage_count = max(1, int(generation_config.max_molecules_per_sequence))
+    generator = rng or random
+    previous_sampled_selfies: list[list[str]] = [[] for _ in examples]
+    trajectory_records: list[list[SampledStageTrajectory]] = [[] for _ in examples]
+    last_valid_trajectories: list[SampledStageTrajectory | None] = [None for _ in examples]
+    stage_indices = [1 for _ in examples]
+    finished = [False for _ in examples]
+
+    while True:
+        active_rows = [
+            row_index
+            for row_index in range(len(examples))
+            if not finished[row_index] and stage_indices[row_index] <= planned_stage_count
+        ]
+        if not active_rows:
+            break
+
+        prefix_texts = [
+            build_stage_prefix(
+                previous_sampled_selfies[row_index],
+                separator_token=generation_config.stage_separator,
+            )
+            for row_index in active_rows
+        ]
+        stage_samples = sample_stage_batch(
+            model,
+            tokenizer,
+            input_ids=prompt_inputs["input_ids"][active_rows],
+            attention_mask=prompt_inputs["attention_mask"][active_rows],
+            encoder_cache=_slice_encoder_cache(encoder_cache, active_rows),
+            decoder_prefix_ids=[
+                encode_decoder_prefix(
+                    tokenizer,
+                    prefix_text,
+                    decoder_start_token_id=decoder_start_token_id,
+                    device=device,
+                )
+                for prefix_text in prefix_texts
+            ],
+            generation_config=generation_config,
+            stage_token_constraints=stage_token_constraints,
+        )
+
+        for local_row, row_index in enumerate(active_rows):
+            trajectory = build_sampled_stage_trajectory_from_generation(
+                example=examples[row_index],
+                rollout_id=str(rollout_ids[row_index]),
+                stage_index=stage_indices[row_index],
+                decoder_prefix_text=prefix_texts[local_row],
+                previous_sampled_selfies=tuple(previous_sampled_selfies[row_index]),
+                stage_text=str(stage_samples[local_row]["stage_text"]),
+                sampled_selfies=stage_samples[local_row]["sampled_selfies"],
+                action_token_ids=stage_samples[local_row]["action_token_ids"],
+                metadata=dict(stage_samples[local_row].get("metadata", {})),
+                stop_token=stage_samples[local_row]["stop_token"],
+                termination_reason=stage_samples[local_row]["termination_reason"],
+                reward_config=reward_config,
+                invalid_terminal_reward=invalid_terminal_reward,
+            )
+            if trajectory.sampled_selfies and trajectory.is_valid:
+                last_valid_trajectories[row_index] = trajectory
+                previous_sampled_selfies[row_index].append(trajectory.sampled_selfies)
+
+            trajectory_appended = False
+            if not return_last_valid_trajectory_only:
+                if trajectory.is_valid:
+                    should_append = stage_indices[row_index] == 1 or (
+                        float(generator.random()) < generation_config.append_probability
+                    )
+                else:
+                    should_append = (
+                        float(generator.random()) < generation_config.invalid_append_probability
+                    )
+                if should_append:
+                    trajectory_records[row_index].append(trajectory)
+                    trajectory_appended = True
+
+            if trajectory.termination_reason != "stop_token":
+                if (
+                    trajectory.is_valid
+                    and not return_last_valid_trajectory_only
+                    and not trajectory_appended
+                ):
+                    trajectory_records[row_index].append(trajectory)
+                finished[row_index] = True
+                continue
+
+            stage_indices[row_index] += 1
+            if (
+                generation_config.terminate_on_invalid_stage
+                and not trajectory.is_valid
+                and stage_indices[row_index] > planned_stage_count
+            ):
+                finished[row_index] = True
+            elif stage_indices[row_index] > planned_stage_count:
+                finished[row_index] = True
+
+    if return_last_valid_trajectory_only:
+        return [
+            [trajectory] if trajectory is not None else []
+            for trajectory in last_valid_trajectories
+        ]
+    return trajectory_records
