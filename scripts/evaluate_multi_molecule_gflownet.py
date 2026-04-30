@@ -5,6 +5,7 @@ import argparse
 import json
 import random
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +57,20 @@ def append_jsonl(path: Path, row: dict[str, object]) -> None:
     with path.open("a", encoding="utf-8") as handle:
         handle.write(json.dumps(row, ensure_ascii=False))
         handle.write("\n")
+
+
+def emit_event(event: str, **payload: object) -> None:
+    print(
+        json.dumps(
+            {
+                "event": str(event),
+                **payload,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+        flush=True,
+    )
 
 
 def build_output_paths(args: argparse.Namespace) -> dict[str, Path]:
@@ -121,6 +136,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=50,
         help="Emit shard-local progress rows every N evaluated examples; 0 disables progress rows.",
+    )
+    parser.add_argument(
+        "--report-every-batches",
+        type=int,
+        default=0,
+        help="Emit worker stdout progress every N batches; 0 disables batch-progress prints.",
     )
     parser.add_argument("--eval-batch-size", type=int, default=8, help="Generation batch size.")
     parser.add_argument(
@@ -206,6 +227,7 @@ def apply_rollout_overrides(
 
 def main() -> None:
     args = parse_args()
+    worker_start_time = time.monotonic()
     output_paths = build_output_paths(args)
     output_paths["worker_output_dir"].mkdir(parents=True, exist_ok=True)
     output_paths["progress_path"].parent.mkdir(parents=True, exist_ok=True)
@@ -240,15 +262,50 @@ def main() -> None:
         compute_n_circles=False,
         n_circles_tanimoto_threshold=float(args.n_circles_tanimoto_threshold),
     )
+    parallel_mode = int(args.worker_num_shards) > 1
     gflownet_config = build_gflownet_config(config)
     reward_config = build_reward_config(
         config.get("reward", {}),
         dataset_hint=str(dataset_path),
     )
-    requested_device = args.cuda_device
-    if str(requested_device).strip().lower() == "auto":
-        requested_device = str(config.get("training", {}).get("device", "auto"))
-    device = choose_device(str(requested_device))
+    requested_device = str(args.cuda_device)
+    effective_requested_device = requested_device
+    if effective_requested_device.strip().lower() == "auto":
+        effective_requested_device = str(config.get("training", {}).get("device", "auto"))
+    device = choose_device(effective_requested_device)
+
+    emit_event(
+        "worker_startup",
+        split_name=str(args.split_name),
+        worker_shard_index=int(args.worker_shard_index),
+        worker_num_shards=int(args.worker_num_shards),
+        dataset_path=str(dataset_path),
+        config_path=str(config_path),
+        checkpoint_path=str(checkpoint_path),
+        seed=int(args.seed),
+        fraction=args.fraction,
+        max_examples=args.max_examples,
+        sample_with_replacement=bool(args.sample_with_replacement),
+        eval_batch_size=int(args.eval_batch_size),
+        acceptance_dice_threshold=float(args.acceptance_dice_threshold),
+        n_circles_tanimoto_threshold=float(args.n_circles_tanimoto_threshold),
+        requested_device=requested_device,
+        effective_requested_device=effective_requested_device,
+        resolved_device=str(device),
+        parallel_mode=parallel_mode,
+    )
+    emit_event(
+        "worker_selection",
+        split_name=str(args.split_name),
+        worker_shard_index=int(args.worker_shard_index),
+        worker_num_shards=int(args.worker_num_shards),
+        dataset_size=len(dataset),
+        num_selected_examples=len(selected_examples),
+        num_shard_examples=len(shard_examples),
+        shard_start_index=shard.start,
+        shard_end_index=shard.end,
+        selected_indices_preview=[int(index) for index in selected_indices[:8]],
+    )
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, use_fast=True)
     tokenizer.model_max_length = int(1.0e9)
@@ -283,7 +340,24 @@ def main() -> None:
         )
         model.set_stage_token_constraints(constraints)
 
-    parallel_mode = int(args.worker_num_shards) > 1
+    emit_event(
+        "worker_model_ready",
+        split_name=str(args.split_name),
+        worker_shard_index=int(args.worker_shard_index),
+        worker_num_shards=int(args.worker_num_shards),
+        resolved_checkpoint=str(checkpoint_path),
+        resolved_device=str(device),
+        rollout_decoding_config={
+            "decoding_strategy": gflownet_config.rollout.decoding_strategy,
+            "num_beams": int(gflownet_config.rollout.num_beams),
+            "length_penalty": float(gflownet_config.rollout.length_penalty),
+            "early_stopping": bool(gflownet_config.rollout.early_stopping),
+            "temperature": float(gflownet_config.rollout.temperature),
+            "top_p": float(gflownet_config.rollout.top_p),
+        },
+        constrained_decoding_enabled=bool(gflownet_config.rollout.constrained_decoding),
+    )
+
     generation_metrics = IncrementalGenerationMetrics(metric_config)
     rollout_metrics = IncrementalRolloutMetrics(
         max_molecules_per_sequence=gflownet_config.rollout.max_molecules_per_sequence,
@@ -292,9 +366,15 @@ def main() -> None:
     generation_rows: list[dict[str, object]] = []
     rng = random.Random(int(args.seed))
     report_every_examples = int(args.report_every_examples)
+    report_every_batches = int(args.report_every_batches)
     should_report_progress = report_every_examples > 0
+    should_report_batches = report_every_batches > 0
 
-    for batch_start, example_batch in batched(shard_examples, int(args.eval_batch_size)):
+    for batch_ordinal, (batch_start, example_batch) in enumerate(
+        batched(shard_examples, int(args.eval_batch_size)),
+        start=1,
+    ):
+        batch_end = batch_start + len(example_batch)
         batch_global_indices = list(
             range(shard.start + batch_start, shard.start + batch_start + len(example_batch))
         )
@@ -316,6 +396,13 @@ def main() -> None:
                 return_last_valid_trajectory_only=False,
             )
 
+        batch_trajectory_count = sum(len(trajectories) for trajectories in trajectory_batches)
+        batch_generated_selfies_count = sum(
+            1
+            for trajectories in trajectory_batches
+            for trajectory in trajectories
+            if trajectory.sampled_selfies
+        )
         batch_selected_indices = shard_selected_indices[batch_start : batch_start + len(example_batch)]
         for example, trajectories, global_example_index, selected_dataset_index in zip(
             example_batch,
@@ -363,14 +450,43 @@ def main() -> None:
                     eval_batch_size=int(args.eval_batch_size),
                 )
                 append_jsonl(output_paths["progress_path"], progress_payload)
-                print(
-                    compact_metrics(
-                        partial_result,
-                        split_name=args.split_name,
-                        progress_examples=evaluated_examples,
-                        mean_trajectory_length=partial_rollout_diagnostics["mean_trajectory_length"],
-                    )
+                progress_metrics = compact_metrics(
+                    partial_result,
+                    split_name=args.split_name,
+                    progress_examples=evaluated_examples,
+                    mean_trajectory_length=partial_rollout_diagnostics["mean_trajectory_length"],
                 )
+                emit_event(
+                    "worker_progress_checkpoint",
+                    split_name=str(args.split_name),
+                    worker_shard_index=int(args.worker_shard_index),
+                    worker_num_shards=int(args.worker_num_shards),
+                    payload_class="progress_payload",
+                    payload_path=str(output_paths["progress_path"]),
+                    metrics_class="compact_metrics",
+                    metrics=progress_metrics,
+                )
+
+        if should_report_batches and batch_ordinal % report_every_batches == 0:
+            batch_rollout_metrics = rollout_metrics.to_metrics()
+            emit_event(
+                "worker_batch_progress",
+                split_name=str(args.split_name),
+                worker_shard_index=int(args.worker_shard_index),
+                worker_num_shards=int(args.worker_num_shards),
+                batch_ordinal_within_shard=batch_ordinal,
+                shard_local_batch_start=batch_start,
+                shard_local_batch_end=batch_end,
+                global_example_index_start=batch_global_indices[0] if batch_global_indices else None,
+                global_example_index_end=batch_global_indices[-1] + 1 if batch_global_indices else None,
+                num_examples_in_batch=len(example_batch),
+                trajectories_generated_in_batch=batch_trajectory_count,
+                generated_selfies_count_in_batch=batch_generated_selfies_count,
+                cumulative_shard_examples_evaluated=generation_metrics.num_groups,
+                cumulative_row_count=len(generation_rows),
+                mean_trajectory_length=float(batch_rollout_metrics["mean_trajectory_length"]),
+                elapsed_seconds=round(time.monotonic() - worker_start_time, 3),
+            )
 
     result = generation_metrics.to_result()
     rollout_diagnostics = rollout_metrics.to_metrics()
@@ -428,22 +544,18 @@ def main() -> None:
     write_json(output_paths["rollout_state_path"], rollout_metrics.to_state_dict())
     write_json(output_paths["summary_path"], summary_payload)
 
-    print(
-        json.dumps(
-            {
-                "split_name": args.split_name,
-                "worker_shard_index": int(args.worker_shard_index),
-                "worker_num_shards": int(args.worker_num_shards),
-                "num_selected_examples": len(selected_examples),
-                "num_shard_examples": len(shard_examples),
-                "metrics_path": str(output_paths["metrics_path"]),
-                "generations_path": str(output_paths["generations_path"]),
-                "progress_path": str(output_paths["progress_path"]),
-                "rollout_state_path": str(output_paths["rollout_state_path"]),
-                "summary_path": str(output_paths["summary_path"]),
-            },
-            indent=2,
-        )
+    emit_event(
+        "worker_complete",
+        split_name=str(args.split_name),
+        worker_shard_index=int(args.worker_shard_index),
+        worker_num_shards=int(args.worker_num_shards),
+        shard_row_count=len(generation_rows),
+        metrics_path=str(output_paths["metrics_path"]),
+        generations_path=str(output_paths["generations_path"]),
+        progress_path=str(output_paths["progress_path"]),
+        rollout_state_path=str(output_paths["rollout_state_path"]),
+        summary_path=str(output_paths["summary_path"]),
+        final_mean_trajectory_length=float(rollout_diagnostics["mean_trajectory_length"]),
     )
 
 
