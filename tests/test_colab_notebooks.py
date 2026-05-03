@@ -336,6 +336,53 @@ def test_colab_lpm24_gflownet_06_v2_notebook_uses_beam_rollout_controls() -> Non
     assert "wandb.log(evaluation_diagnosis)" in eval_cell
 
 
+def test_lpm24_gflownet_06_template_uses_adapter_aware_restart_checkpoint_helper() -> None:
+    notebook = _load_notebook(
+        "notebook_templates/06_template_v2_train_multi_molecule_gflownet_lpm24.ipynb"
+    )
+
+    assert notebook["nbformat"] == 4
+    assert len(notebook["cells"]) == 8
+
+    parameter_cell = _joined_source(notebook["cells"][2])
+    run_cell = _joined_source(notebook["cells"][5])
+
+    assert (
+        'GFLOWNET_CHECKPOINT_DOWNLOAD_SOURCE = "1jCIVYbzgTw7xQAWvv6SfwM8Y1vL47PDg"'
+        in parameter_cell
+    )
+    assert "UPSTREAM_CHECKPOINT" in parameter_cell
+    assert "restart_checkpoint_source = GFLOWNET_RESTART_CHECKPOINT_SOURCE.strip()" in run_cell
+    assert "scripts/upload_adapters.py" in run_cell
+    assert "scripts/prepare_gflownet_restart_checkpoint.py" not in run_cell
+    assert '"--download-source"' in run_cell
+    assert '"--zip-path"' in run_cell
+    assert '"--extract-dir"' in run_cell
+    assert '"--upstream-checkpoint"' in run_cell
+    assert "str(UPSTREAM_CHECKPOINT)" in run_cell
+    assert '"--skip-existing"' in run_cell
+    assert '"--fallback-learning-rate"' in run_cell
+    assert "str(GFLOWNET_LEARNING_RATE)" in run_cell
+    assert (
+        'runtime_config.setdefault("model", {})["checkpoint"] = '
+        'restart_checkpoint_payload["checkpoint_dir"]'
+    ) in run_cell
+    assert (
+        'gflownet_payload["learning_rate"] = '
+        'float(restart_checkpoint_payload.get("learning_rate", GFLOWNET_LEARNING_RATE))'
+    ) in run_cell
+    assert (
+        'gflownet_payload["start_iteration"] = '
+        'int(restart_checkpoint_payload.get("restart_iteration", 0))'
+    ) in run_cell
+    assert '"restart_artifact_kind": restart_artifact_kind' in run_cell
+    assert '"resolved_restart_merge_base": resolved_restart_merge_base' in run_cell
+    assert '"resolved_restart_merge_base_source": resolved_restart_merge_base_source' in run_cell
+    assert '"restart_learning_rate": restart_checkpoint_payload["learning_rate"]' in run_cell
+    assert '"restart_iteration": restart_checkpoint_payload["restart_iteration"]' in run_cell
+    assert '"next_iteration": restart_checkpoint_payload["next_iteration"]' in run_cell
+
+
 def test_colab_lpm24_gflownet_08_notebook_stress_tests_memory_path() -> None:
     notebook = _load_notebook("colab/08_stress_test_gflownet_memory_lpm24.ipynb")
 

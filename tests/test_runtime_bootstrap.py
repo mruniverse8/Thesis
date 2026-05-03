@@ -112,6 +112,7 @@ def test_new_bootstrap_scripts_import_cleanly() -> None:
         Path("scripts") / "download_train_dataset.py",
         Path("scripts") / "download_ppo_checkpoint.py",
         Path("scripts") / "prepare_gflownet_restart_checkpoint.py",
+        Path("scripts") / "upload_adapters.py",
         Path("scripts") / "init_colab.py",
         Path("scripts") / "init_kaggle.py",
         Path("scripts") / "train_multi_molecule_gflownet.py",
