@@ -39,6 +39,7 @@ from .checkpointing import (
     prepare_gflownet_output_dir,
     save_gflownet_checkpoint_artifacts,
     save_gflownet_iteration_artifacts,
+    save_gflownet_last_artifacts,
     write_gflownet_history,
 )
 from .config import GFlowNetConfig, build_gflownet_config
@@ -258,6 +259,9 @@ class MultiMoleculeGFlowNetTrainer:
         self.best_checkpoint_iteration: int | None = None
         self.best_checkpoint_dir: str | None = None
         self.best_checkpoint_zip: str | None = None
+        self.last_checkpoint_iteration: int | None = None
+        self.last_checkpoint_dir: str | None = None
+        self.last_checkpoint_zip: str | None = None
 
     def _resolve_parallel_devices(
         self,
@@ -1285,7 +1289,7 @@ class MultiMoleculeGFlowNetTrainer:
         metrics: dict[str, Any],
         trajectories: Sequence[SampledStageTrajectory],
     ):
-        return save_gflownet_iteration_artifacts(
+        checkpoint_dir = save_gflownet_iteration_artifacts(
             output_dir=self.config.output_dir,
             iteration_index=iteration_index,
             model=self.model,
@@ -1295,6 +1299,21 @@ class MultiMoleculeGFlowNetTrainer:
             trajectories=trajectories,
             create_archive=iteration_index == self._final_iteration_index(),
         )
+        if iteration_index == self._final_iteration_index():
+            last_checkpoint_dir, last_checkpoint_zip = save_gflownet_last_artifacts(
+                output_dir=self.config.output_dir,
+                model=self.model,
+                tokenizer=self.tokenizer,
+                config=self.config.to_dict(),
+                metrics=metrics,
+                trajectories=trajectories,
+            )
+            self.last_checkpoint_iteration = iteration_index
+            self.last_checkpoint_dir = str(last_checkpoint_dir)
+            self.last_checkpoint_zip = (
+                str(last_checkpoint_zip) if last_checkpoint_zip is not None else None
+            )
+        return checkpoint_dir
 
     def save_best_checkpoint(
         self,
@@ -1545,6 +1564,9 @@ def run_multi_molecule_gflownet(config: dict[str, object]) -> dict[str, object]:
             "best_checkpoint_iteration": getattr(trainer, "best_checkpoint_iteration", None),
             "best_checkpoint_dir": getattr(trainer, "best_checkpoint_dir", None),
             "best_checkpoint_zip": getattr(trainer, "best_checkpoint_zip", None),
+            "last_checkpoint_iteration": getattr(trainer, "last_checkpoint_iteration", None),
+            "last_checkpoint_dir": getattr(trainer, "last_checkpoint_dir", None),
+            "last_checkpoint_zip": getattr(trainer, "last_checkpoint_zip", None),
         }
         write_json(output_dir / "run_summary.json", summary)
         tracker.log_summary(_build_gflownet_tracking_summary(summary), prefix="gflownet")
