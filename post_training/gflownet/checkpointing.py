@@ -124,3 +124,23 @@ def save_gflownet_iteration_artifacts(
         create_archive=create_archive,
     )
     return checkpoint_dir
+
+
+def save_gflownet_last_artifacts(
+    *,
+    output_dir: str | Path,
+    model,
+    tokenizer,
+    config: dict[str, Any],
+    metrics: dict[str, Any],
+    trajectories: Sequence,
+) -> tuple[Path, Path | None]:
+    return save_gflownet_checkpoint_artifacts(
+        checkpoint_dir=Path(output_dir) / "checkpoints" / "last",
+        model=model,
+        tokenizer=tokenizer,
+        config=config,
+        metrics=metrics,
+        trajectories=trajectories,
+        create_archive=True,
+    )
