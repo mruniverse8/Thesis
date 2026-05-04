@@ -108,6 +108,7 @@ class EvaluationMetricsResult:
     num_unique_valid_molecules: int
     num_accepted: int
     accepted_unique_count: int
+    accepted_unique_mean: float
     n_circles: int
     n_circles_exact: bool
     internal_diversity: float
@@ -126,6 +127,8 @@ class EvaluationMetricsResult:
             "num_unique_valid_molecules": self.num_unique_valid_molecules,
             "num_accepted": self.num_accepted,
             "accepted_unique_count": self.accepted_unique_count,
+            "accepted_unique_mean": self.accepted_unique_mean,
+            "num_rejected": self.num_valid_candidates - self.num_accepted,
             "n_circles": self.n_circles,
             "n_circles_exact": self.n_circles_exact,
             "internal_diversity": self.internal_diversity,
@@ -376,7 +379,6 @@ def evaluate_generation_groups(
     valid_seen_smiles: set[str] = set()
     accepted_by_smiles: dict[str, PreparedMolecule] = {}
     target_seen_smiles: set[str] = set()
-    max_dice_values: list[float] = []
 
     for group in groups:
         target_references = _prepare_targets(group.targets, config=metric_config)
@@ -414,7 +416,6 @@ def evaluate_generation_groups(
                         rejection_reason="invalid_molecule",
                     )
                 )
-                max_dice_values.append(0.0)
                 continue
 
             if not target_references:
@@ -431,7 +432,6 @@ def evaluate_generation_groups(
                         rejection_reason="no_valid_targets",
                     )
                 )
-                max_dice_values.append(0.0)
                 continue
 
             assert canonical_smiles is not None
@@ -440,7 +440,6 @@ def evaluate_generation_groups(
                 candidate_fp,
                 target_references,
             )
-            max_dice_values.append(max_dice)
             is_accepted = max_dice > metric_config.acceptance_dice_threshold
             rejection_reason = None if is_accepted else "below_dice_threshold"
             if is_accepted:
@@ -480,11 +479,21 @@ def evaluate_generation_groups(
     )
     num_candidates = len(assessments)
     num_accepted = sum(int(assessment.is_accepted) for assessment in assessments)
+    accepted_max_dice_values = [
+        assessment.max_dice_similarity
+        for assessment in assessments
+        if assessment.is_accepted
+    ]
     mean_max_dice = (
-        sum(max_dice_values) / len(max_dice_values)
-        if max_dice_values
+        sum(accepted_max_dice_values) / len(accepted_max_dice_values)
+        if accepted_max_dice_values
         else 0.0
     )
+    per_group_accepted: dict[str, set[str]] = {}
+    for assessment in assessments:
+        if assessment.is_accepted and assessment.canonical_smiles:
+            per_group_accepted.setdefault(assessment.group_id, set()).add(assessment.canonical_smiles)
+    accepted_unique_mean = sum(len(s) for s in per_group_accepted.values()) / max(len(groups), 1)
     novel_accepted_unique_smiles = tuple(
         smiles
         for smiles in sorted(accepted_by_smiles)
@@ -500,6 +509,7 @@ def evaluate_generation_groups(
         num_unique_valid_molecules=len(valid_seen_smiles),
         num_accepted=num_accepted,
         accepted_unique_count=len(accepted_unique),
+        accepted_unique_mean=accepted_unique_mean,
         n_circles=n_circles_value,
         n_circles_exact=n_circles_exact_value,
         internal_diversity=internal_diversity(accepted_fingerprints),
