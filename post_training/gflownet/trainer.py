@@ -1299,20 +1299,19 @@ class MultiMoleculeGFlowNetTrainer:
             trajectories=trajectories,
             create_archive=iteration_index == self._final_iteration_index(),
         )
-        if iteration_index == self._final_iteration_index():
-            last_checkpoint_dir, last_checkpoint_zip = save_gflownet_last_artifacts(
-                output_dir=self.config.output_dir,
-                model=self.model,
-                tokenizer=self.tokenizer,
-                config=self.config.to_dict(),
-                metrics=metrics,
-                trajectories=trajectories,
-            )
-            self.last_checkpoint_iteration = iteration_index
-            self.last_checkpoint_dir = str(last_checkpoint_dir)
-            self.last_checkpoint_zip = (
-                str(last_checkpoint_zip) if last_checkpoint_zip is not None else None
-            )
+        last_checkpoint_dir, last_checkpoint_zip = save_gflownet_last_artifacts(
+            output_dir=self.config.output_dir,
+            model=self.model,
+            tokenizer=self.tokenizer,
+            config=self.config.to_dict(),
+            metrics=metrics,
+            trajectories=trajectories,
+        )
+        self.last_checkpoint_iteration = iteration_index
+        self.last_checkpoint_dir = str(last_checkpoint_dir)
+        self.last_checkpoint_zip = (
+            str(last_checkpoint_zip) if last_checkpoint_zip is not None else None
+        )
         return checkpoint_dir
 
     def save_best_checkpoint(

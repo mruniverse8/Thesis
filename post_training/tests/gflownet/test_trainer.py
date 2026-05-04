@@ -1351,7 +1351,7 @@ def test_train_iteration_proceeds_with_target_teacher_when_on_policy_is_empty(
     assert "objective_loss" in result.metrics
 
 
-def test_save_checkpoint_writes_last_archive_only_for_final_iteration(
+def test_save_checkpoint_overwrites_last_archive_on_every_save(
     tmp_path: Path,
 ) -> None:
     class DummyTokenizer:
@@ -1410,10 +1410,20 @@ def test_save_checkpoint_writes_last_archive_only_for_final_iteration(
         trajectories=trajectories,
     )
 
+    last_checkpoint_dir = output_dir / "checkpoints" / "last"
+    last_checkpoint_zip = output_dir / "checkpoints" / "last.zip"
+
     assert non_final_checkpoint_dir == output_dir / "checkpoints" / "iteration-0011"
-    assert not (output_dir / "checkpoints" / "last").exists()
-    assert not (output_dir / "checkpoints" / "last.zip").exists()
-    assert trainer.last_checkpoint_iteration is None
+    assert last_checkpoint_dir.exists()
+    assert last_checkpoint_zip.exists()
+    assert trainer.last_checkpoint_iteration == 11
+    assert trainer.last_checkpoint_dir == str(last_checkpoint_dir)
+    assert trainer.last_checkpoint_zip == str(last_checkpoint_zip)
+    assert json.loads((last_checkpoint_dir / "iteration_metrics.json").read_text())[
+        "objective_loss"
+    ] == 1.5
+    with ZipFile(last_checkpoint_zip) as archive:
+        assert "last/iteration_metrics.json" in archive.namelist()
 
     final_checkpoint_dir = trainer.save_checkpoint(
         iteration_index=12,
@@ -1421,8 +1431,6 @@ def test_save_checkpoint_writes_last_archive_only_for_final_iteration(
         trajectories=trajectories,
     )
 
-    last_checkpoint_dir = output_dir / "checkpoints" / "last"
-    last_checkpoint_zip = output_dir / "checkpoints" / "last.zip"
     assert final_checkpoint_dir == output_dir / "checkpoints" / "iteration-0012"
     assert final_checkpoint_dir.with_suffix(".zip").exists()
     assert last_checkpoint_dir.exists()
