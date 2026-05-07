@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from rdkit import DataStructs
+from rdkit.Chem import Crippen, QED
 
 from molecules.defaults import (
     DEFAULT_ACCEPTANCE_DICE_THRESHOLD,
@@ -113,6 +114,8 @@ class EvaluationMetricsResult:
     n_circles_exact: bool
     internal_diversity: float
     mean_max_dice_similarity: float
+    mean_logp_accepted: float = 0.0
+    mean_qed_accepted: float = 0.0
     accepted_unique_smiles: tuple[str, ...] = field(default_factory=tuple)
     novelty_count: int = 0
     novelty_fraction: float = 0.0
@@ -133,6 +136,8 @@ class EvaluationMetricsResult:
             "n_circles_exact": self.n_circles_exact,
             "internal_diversity": self.internal_diversity,
             "mean_max_dice_similarity": self.mean_max_dice_similarity,
+            "mean_logp_accepted": self.mean_logp_accepted,
+            "mean_qed_accepted": self.mean_qed_accepted,
             "accepted_unique_smiles": list(self.accepted_unique_smiles),
             "novelty_count": self.novelty_count,
             "novelty_fraction": self.novelty_fraction,
@@ -468,6 +473,14 @@ def evaluate_generation_groups(
 
     accepted_unique = tuple(accepted_by_smiles.values())
     accepted_fingerprints = tuple(molecule.fingerprint for molecule in accepted_unique)
+    if accepted_unique:
+        logp_values = [Crippen.MolLogP(prepared.record.mol) for prepared in accepted_unique]
+        qed_values = [QED.qed(prepared.record.mol) for prepared in accepted_unique]
+        mean_logp_accepted = sum(logp_values) / len(logp_values)
+        mean_qed_accepted = sum(qed_values) / len(qed_values)
+    else:
+        mean_logp_accepted = 0.0
+        mean_qed_accepted = 0.0
     n_circles_value, n_circles_exact_value = (
         n_circles(
             accepted_fingerprints,
@@ -514,6 +527,8 @@ def evaluate_generation_groups(
         n_circles_exact=n_circles_exact_value,
         internal_diversity=internal_diversity(accepted_fingerprints),
         mean_max_dice_similarity=mean_max_dice,
+        mean_logp_accepted=mean_logp_accepted,
+        mean_qed_accepted=mean_qed_accepted,
         accepted_unique_smiles=tuple(sorted(accepted_by_smiles)),
         novelty_count=novelty_count,
         novelty_fraction=novelty_fraction,
